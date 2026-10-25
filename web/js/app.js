@@ -1072,8 +1072,8 @@ function ensureTourEl() {
   t = document.createElement("div");
   t.className = "tour"; t.id = "tour";
   t.innerHTML = `<h4 id="tourTitle"></h4><p id="tourText"></p>
+    <label class="tour-never" title="Тур больше не будет открываться автоматически"><input type="checkbox" id="tourNever"> больше не показывать</label>
     <div class="tour-foot"><div class="tour-dots" id="tourDots"></div>
-      <label class="tour-never" title="Тур больше не будет открываться автоматически"><input type="checkbox" id="tourNever"> больше не показывать</label>
       <button class="tour-skip" id="tourSkip">Пропустить</button>
       <button class="btn btn-accent sm" id="tourNext">Далее</button></div>`;
   document.body.appendChild(t);
@@ -1143,6 +1143,7 @@ const CHANGELOG = [
     "Общий выключатель режима «Ретро»",
     "Фиксы: колесо мыши, кэш WebView2, обучающий тур, ложный тост о мосте",
     "Кинематографичная заставка в стиле Ubisoft (клик — пропустить)",
+    "Фиксы: галочка тура врезана в карточку, достижимая прокрутка до низа",
   ]},
   { v: "14.0", date: "2026-10-18", title: "World Edition (Tkinter)", items: [
     "Страны мира вместо трёх регионов, флаги и коэффициенты",
