@@ -4,7 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>FS25 Автобалансировщик v15</title>
-<link rel="stylesheet" href="css/app.css">
+<meta http-equiv="Cache-Control" content="no-store">
+<link rel="stylesheet" href="css/app.css?v=15.1">
 <script>
 window.__jsErrors = [];
 window.addEventListener("error", function (e) {
@@ -23,6 +24,16 @@ setInterval(function () {
 </script>
 </head>
 <body>
+
+<div class="intro" id="intro">
+  <div class="in-rays"></div>
+  <div class="in-grid" id="inGrid"></div>
+  <div class="in-cube"><i></i><i></i><i></i><i></i><i></i><i></i></div>
+  <h1 class="in-title" id="inTitle"></h1>
+  <div class="in-sub">Автобалансировщик цен</div>
+  <div class="in-horizon"></div>
+  <div class="in-skip">клик или клавиша — пропустить</div>
+</div>
 
 <div class="boot" id="boot">
   <div class="boot-card">
@@ -119,8 +130,9 @@ setInterval(function () {
           <label class="switch"><input type="checkbox" id="addCurr" checked><span class="track"><i></i></span><em>Использовать доп. валюту</em></label>
           <label class="switch"><input type="checkbox" id="backups" checked><span class="track"><i></i></span><em>Создавать бэкапы перед применением</em></label>
         </div>
-        <div class="card">
+        <div class="card" id="retroCard">
           <h3>🕰 Ретро-техника</h3>
+          <label class="switch"><input type="checkbox" id="retroOn" checked><span class="track"><i></i></span><em>Режим «Ретро» включён</em></label>
           <div class="field"><label>Коэффициент цены ретро, % <span class="val" id="vRetroK">65</span></label>
             <input type="range" id="retroK" min="0" max="100" step="1" value="65"></div>
           <div class="field"><label>Коэффициент износа ретро, % <span class="val" id="vWearK">15</span></label>
@@ -243,6 +255,6 @@ setInterval(function () {
 <div class="toast-wrap" id="toasts"></div>
 <div class="logbar"><span class="dot"></span><span id="logText" class="dim">готов</span></div>
 
-<script src="js/app.js"></script>
+<script src="js/app.js?v=15.1"></script>
 </body>
 </html>

@@ -24,7 +24,11 @@ CHANGELOG = [
         "Кнопка «Обновить цены» без повторного сканирования",
         "PRO-режим: списки брендов по каждой стране",
         "Интерактивный онбординг (тур)",
-        "ИИ в один клик: каталог моделей, тихая установка Ollama с согласия",
+        "ИИ в один клик: каталог 12 моделей + mistral, рекомендация по железу",
+        "Удаление моделей и деинсталляция Ollama прямо из программы",
+        "Общий выключатель режима «Ретро» в настройках",
+        "Фиксы: прокрутка колесом, кэш WebView2, обучающий тур, тост о мосте",
+        "Кинематографичная заставка в стиле Ubisoft",
         "История обновлений в приложении",
     ]},
     {"v": "14.0", "date": "2026-10-20", "items": [
@@ -251,6 +255,15 @@ class Api:
         threading.Thread(target=w, daemon=True).start()
         return {"ok": True}
 
+    def ai_uninstall(self) -> dict:
+        def w():
+            from core.ai import uninstall_ollama
+            from core.service import emit
+            uninstall_ollama(lambda m: emit("ai_progress", {"msg": m}))
+            self._refresh_ai()
+        threading.Thread(target=w, daemon=True).start()
+        return {"ok": True}
+
     def ai_install(self) -> dict:
         def w():
             from core.ai import install_ollama_app
@@ -270,8 +283,9 @@ class Api:
 
     def ai_delete(self, model: str) -> dict:
         def w():
-            from core.ai import delete_model
+            from core.ai import delete_model, start_ollama
             from core.service import emit
+            start_ollama(lambda m: None)
             delete_model(str(model), lambda m: None,
                          lambda m: emit("ai_done", {"msg": m}))
         threading.Thread(target=w, daemon=True).start()
@@ -349,6 +363,8 @@ def _setup_pywebview_log():
 
 
 def main():
+    # WebView2 иначе кэширует app.js/app.css между запусками — фиксы не долетают до пользователя
+    os.environ.setdefault("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", "--disable-http-cache")
     logf = _setup_crashlog()
     _setup_pywebview_log()
     print("[boot] crashlog:", logf.name, flush=True)

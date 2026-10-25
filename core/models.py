@@ -30,6 +30,7 @@ class BalancerConfig:
     k_field: float = 1.0
     k_retro: float = 0.65          # коэффициент цены ретро-техники
     retro_wear: float = 0.15       # коэффициент износа ретро (0..1)
+    retro_enabled: bool = True     # общий выключатель ретро-механики
     global_difficulty_scale: float = 1.0
     create_backups: bool = True
     use_local_ai: bool = True

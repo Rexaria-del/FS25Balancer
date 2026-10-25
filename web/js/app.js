@@ -15,7 +15,12 @@ function api() {
 }
 async function call(name, ...args) {
   const a = api();
-  if (!a || typeof a[name] !== "function") { toast("err", "Мост Python ещё не готов"); return null; }
+  // До завершения boot мост может отсутствовать первые сотни мс — молча ретраимся,
+  // тостим только когда UI уже живёт, а вызов всё равно не проходит.
+  if (!a || typeof a[name] !== "function") {
+    if (S.boot) toast("err", "Мост Python ещё не готов");
+    return null;
+  }
   try {
     return await a[name](...args);
   } catch (e) {
@@ -76,9 +81,39 @@ function showView(key) {
   $$(".view").forEach(v => v.classList.toggle("is-on", v.id === "view-" + key));
   $("#viewTitle").textContent = VIEW_TITLES[key] || "";
   if (key === "fields") drawCurve();
-  if (S.tourStep >= 0) placeTour();
 }
-$$(".nav-i").forEach(b => b.onclick = () => showView(b.dataset.view));
+$$(".nav-i").forEach(b => {
+  b.onclick = () => { showView(b.dataset.view); if (S.tourStep >= 0) placeTour(); };
+});
+
+/* ── кинематографичная заставка (стиль Ubisoft) ── */
+S.introDone = false;
+let _introRes = null;
+const _introP = new Promise(r => { _introRes = r; });
+
+function finishIntro() {
+  if (S.introDone) return;
+  S.introDone = true;
+  const el = $("#intro");
+  if (el) { el.classList.add("is-out"); setTimeout(() => el.remove(), 900); }
+  if (_introRes) _introRes();
+}
+
+function introWait() { return S.introDone ? Promise.resolve() : _introP; }
+
+function startIntro() {
+  const el = $("#intro");
+  if (!el) return finishIntro();
+  $("#inTitle").innerHTML = "FS25 BALANCER".split("").map((ch, i) =>
+    `<span style="animation-delay:${(0.95 + i * 0.052).toFixed(2)}s">${ch === " " ? "&nbsp;" : esc(ch)}</span>`).join("");
+  let g = "";
+  for (let i = 0; i < 90; i++) g += `<i style="left:${(Math.random() * 100).toFixed(1)}%;top:${(Math.random() * 100).toFixed(1)}%;animation-delay:${(Math.random() * 1.8).toFixed(2)}s;animation-duration:${(2.2 + Math.random() * 2.2).toFixed(2)}s"></i>`;
+  $("#inGrid").innerHTML = g;
+  setTimeout(finishIntro, 3600);
+  const skip = () => { finishIntro(); document.removeEventListener("click", skip); document.removeEventListener("keydown", skip); };
+  document.addEventListener("click", skip);
+  document.addEventListener("keydown", skip);
+}
 
 /* ── загрузка ── */
 async function boot() {
@@ -114,7 +149,8 @@ async function bootInner() {
   (b.items || []).forEach(putItem);
   renderTable();
 
-  setTimeout(() => {
+  setTimeout(async () => {
+    await introWait();
     $("#boot").classList.add("is-out");
     $("#shell").hidden = false;
     setTimeout(() => { $("#boot").remove(); }, 600);
@@ -138,6 +174,8 @@ function applyConfigToUI(c) {
   $("#addCurr").checked = !!c.use_additional_currencies;
   $("#rate").value = c.exchange_rate;
   $("#adjFields").checked = !!c.adjust_field_prices;
+  $("#retroOn").checked = c.retro_enabled !== false;
+  paintRetroState(c.retro_enabled !== false);
   $("#maxD").value = c.field_max_distance;
   $("#spread").value = Math.round(c.field_distance_spread * 100);
   $("#backups").checked = !!c.create_backups;
@@ -275,25 +313,45 @@ async function checkAi() {
 }
 
 function renderAiCatalog() {
-  const st = S.ai || { catalog: [], installed: [], running: false, current: "", ollama_installed: false };
+  const st = S.ai || { catalog: [], installed: [], running: false, current: "", ollama_installed: false, rec: "" };
   const inst = st.installed || [];
   const has = n => inst.some(x => x === n || x.indexOf(n.split(":")[0] + ":") === 0);
-  $("#aiList").innerHTML = (st.catalog || []).map(m => `
-    <div class="ai-i"><span><b>${esc(m.name)}</b> <span class="dim">· ${esc(m.size)} · ${esc(m.desc)}</span></span>
-      <span style="display:flex;gap:6px;flex:0 0 auto">
-        ${has(m.name) ? `<button class="mini" data-use="${esc(m.name)}">${st.current === m.name ? "✓ выбрана" : "выбрать"}</button>` : ""}
-        <button class="mini" data-setup="${esc(m.name)}">${has(m.name) ? "⟳ переустановить" : "⬇ установить и использовать"}</button>
-      </span></div>`).join("")
-    + `<div class="dim sm" style="margin-top:10px">Или любой тег из библиотеки Ollama:</div>
-      <div style="display:flex;gap:8px"><input type="text" id="aiModelCustom" placeholder="например mistral:7b" value="${esc(st.current || "")}">
-      <button class="mini" id="btnCustomSetup">настроить</button></div>`;
+  $("#aiList").innerHTML =
+      `<div class="hw-rec">Железо: ${esc(st.rec_reason || "не определено")}. Для задач программы (короткая классификация «страна/ретро») рекомендуем <b>${esc(st.rec || "?")}</b>.</div>` +
+      (st.catalog || []).map(m => `
+      <div class="ai-i${m.name === st.rec ? " is-rec" : ""}"><span><b>${esc(m.name)}</b>${m.name === st.rec ? ' <span class="rec-badge">✓ рекомендация</span>' : ""}
+        <span class="dim">· ${esc(m.size)} · ${esc(m.desc)}</span></span>
+        <span style="display:flex;gap:6px;flex:0 0 auto">
+          ${has(m.name) ? `<button class="mini" data-use="${esc(m.name)}">${st.current === m.name ? "✓ выбрана" : "выбрать"}</button>` : ""}
+          <button class="mini" data-setup="${esc(m.name)}">${has(m.name) ? "⟳ заново" : "⬇ установить и использовать"}</button>
+        </span></div>`).join("") +
+      (inst.length ? `<div class="hr"></div><div class="dim sm">Установленные модели (${inst.length}) — можно удалить из программы:</div>` +
+        inst.map(n => `
+        <div class="ai-i"><span>${esc(n)}${n === st.current ? ' <span class="dim"> · текущая</span>' : ""}</span>
+          <button class="mini danger" data-del="${esc(n)}">🗑 удалить</button></div>`).join("") : "") +
+      `<div class="hr"></div>
+      <div class="dim sm">Или любой тег из библиотеки Ollama:</div>
+      <div style="display:flex;gap:8px"><input type="text" id="aiModelCustom" placeholder="например mistral:latest" value="${esc(st.current || "")}">
+      <button class="mini" id="btnCustomSetup">настроить</button></div>
+      <div class="btnrow"><button class="mini danger" id="btnAiUninstall">🗑 Удалить Ollama из системы</button></div>`;
   $$("#aiList [data-use]").forEach(b => b.onclick = async () => {
     const r = await call("set_config", { ai_model_name: b.dataset.use, use_local_ai: true });
-    if (r && r.ok) { toast("ok", "Модель выбрана: " + b.dataset.use); checkAi(); }
+    if (r && r.ok) { toast("ok", "Модель выбрана: " + b.dataset.use); S.ai.current = b.dataset.use; renderAiCatalog(); }
   });
   $$("#aiList [data-setup]").forEach(b => b.onclick = () => aiOneClick(b.dataset.setup));
+  $$("#aiList [data-del]").forEach(b => b.onclick = async () => {
+    if (!confirm("Удалить модель " + b.dataset.del + " с диска?")) return;
+    const r = await call("ai_delete", b.dataset.del);
+    if (r && r.ok) toast("info", "Удаляю " + b.dataset.del + " — следи за журналом");
+  });
   const bc = $("#btnCustomSetup");
   if (bc) bc.onclick = () => { const v = $("#aiModelCustom").value.trim(); if (v) aiOneClick(v); else toast("warn", "Введите тег модели"); };
+  const bu = $("#btnAiUninstall");
+  if (bu) bu.onclick = async () => {
+    if (!confirm("Удалить Ollama из системы? Запустится тихий деинсталлятор; папка со скачанными моделями (%USERPROFILE%\\.ollama) останется — снесёшь её руками при желании.")) return;
+    const r = await call("ai_uninstall");
+    if (r && r.ok) toast("info", "Запускаю деинсталляцию Ollama…");
+  };
 }
 
 async function aiOneClick(model) {
@@ -362,7 +420,7 @@ function rowEl(it) {
     <span class="c-brand" title="${esc(it.brand)}">${esc(it.brand)}</span>
     <span class="c-country" data-country="${esc(it.unique_key)}" title="Двойной клик — сменить страну">
       <span class="fl">${it.country_flag}</span><em>${esc(it.country)}</em></span>
-    <span class="c-retro"><span class="mini-sw${it.is_retro ? " is-on" : ""}" data-retro="${esc(it.unique_key)}"
+    <span class="c-retro"><span class="mini-sw${it.is_retro ? " is-on" : ""}${(S.boot && S.boot.config.retro_enabled === false) ? " is-dis" : ""}" data-retro="${esc(it.unique_key)}"
       title="Ретро: цена × коэффициент ретро"><i></i></span></span>
     <span class="c-specs" title="${specs}">${specs}</span>
     <span class="c-old">${fmt(it.old_price)}</span>
@@ -392,6 +450,7 @@ $("#tbody").addEventListener("dblclick", e => {
 });
 
 async function toggleRetro(key, on) {
+  if (S.boot && S.boot.config.retro_enabled === false) return toast("warn", "Ретро-режим выключен в настройках");
   const r = await call("set_retro", key, on);
   if (!r || !r.ok) { toast("err", (r && r.error) || "Не удалось переключить ретро"); return; }
   S.items.set(key, r.item);
@@ -733,12 +792,17 @@ function bindSettings() {
 
   const sw = [
     ["addCurr", "use_additional_currencies"], ["adjFields", "adjust_field_prices"],
-    ["backups", "create_backups"], ["useAi", "use_local_ai"],
+    ["backups", "create_backups"], ["useAi", "use_local_ai"], ["retroOn", "retro_enabled"],
   ];
   for (const [id, key] of sw) {
     document.getElementById(id).addEventListener("change", async e => {
       const r = await call("set_config", { [key]: e.target.checked });
-      if (r && r.ok) { S.boot.config = r.config; if (key === "adjust_field_prices") drawCurve(); }
+      if (r && r.ok) {
+        S.boot.config = r.config;
+        if (key === "adjust_field_prices") drawCurve();
+        if (key === "retro_enabled") paintRetroState(e.target.checked);
+        if (key === "retro_enabled" && S.order.length) guard(call("recalc"));
+      }
       toast(e.target.checked ? "ok" : "info", labelOf(key) + (e.target.checked ? " — вкл" : " — выкл"));
     });
   }
@@ -784,7 +848,14 @@ function bindSettings() {
 }
 function labelOf(key) {
   return { use_additional_currencies: "Доп. валюта", adjust_field_prices: "Изменять цены на поля",
-           create_backups: "Резервные копии", use_local_ai: "Определять страну через ИИ" }[key] || key;
+           create_backups: "Резервные копии", use_local_ai: "Определять страну через ИИ",
+           retro_enabled: "Режим «Ретро»" }[key] || key;
+}
+function paintRetroState(on) {
+  const card = $("#retroCard");
+  if (card) card.classList.toggle("is-off", !on);
+  ["retroK", "wearK"].forEach(id => { const el = document.getElementById(id); if (el) el.disabled = !on; });
+  $$(".mini-sw").forEach(el => el.classList.toggle("is-dis", !on));
 }
 
 /* ── график зависимости цены поля от расстояния ── */
@@ -900,6 +971,20 @@ $$("#filters .chip").forEach(c => c.onclick = () => {
   renderTable();
 });
 $("#search").addEventListener("input", debounce(e => { S.query = e.target.value.trim(); renderTable(); }, 220));
+
+/* ── прокрутка колесом: WebView2 теряет wheel на вложенных скроллах ── */
+document.addEventListener("wheel", e => {
+  let el = e.target instanceof Element ? e.target : (e.target && e.target.parentElement);
+  while (el && el !== document.body) {
+    if (el.scrollHeight > el.clientHeight + 4) {
+      const oy = getComputedStyle(el).overflowY;
+      if (oy === "auto" || oy === "scroll") { el.scrollTop += e.deltaY; e.preventDefault(); return; }
+    }
+    el = el.parentElement;
+  }
+  const v = $(".view.is-on");
+  if (v && v.scrollHeight > v.clientHeight) { v.scrollTop += e.deltaY; e.preventDefault(); }
+}, { passive: false });
 
 /* ── heist-эффект кнопок ── */
 document.addEventListener("mousemove", e => {
@@ -1019,7 +1104,11 @@ const CHANGELOG = [
     "Поля: цена зависит от расстояния до магазина, радиус и сила влияния, график",
     "Ручной ввод площади/дистанции поля; неопознанные значения помечаются «Проверить»",
     "Интерактивное обучение для новых пользователей и журнал версий",
-    "ИИ в один клик: каталог моделей, тихая установка Ollama с согласия пользователя",
+    "ИИ в один клик: каталог из 12 моделей + mistral, рекомендация по железу",
+    "Удаление скачанных моделей и деинсталляция Ollama из программы",
+    "Общий выключатель режима «Ретро»",
+    "Фиксы: колесо мыши, кэш WebView2, обучающий тур, ложный тост о мосте",
+    "Кинематографичная заставка в стиле Ubisoft (клик — пропустить)",
   ]},
   { v: "14.0", date: "2026-10-18", title: "World Edition (Tkinter)", items: [
     "Страны мира вместо трёх регионов, флаги и коэффициенты",
@@ -1072,6 +1161,7 @@ window.addEventListener("DOMContentLoaded", () => {
   try { bindSettings(); } catch (e) { console.error("bindSettings", e); }
   try { injectFooterButtons(); } catch (e) { console.error("footer", e); }
   boot();
+  startIntro();
   document.addEventListener("keydown", e => {
     if (e.key === "Escape") { closePop(); closeMenu(); closeTtx(); if ($("#clModal")) $("#clModal").hidden = true; }
     if (e.key === "F5") { e.preventDefault(); renderTable(); }

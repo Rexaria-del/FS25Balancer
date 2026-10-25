@@ -67,6 +67,7 @@ class BalancerService:
             k_field=max(0.05, float(data.get("k_field", 1.0))),
             k_retro=min(1.0, max(0.0, float(data.get("k_retro", 0.65)))),
             retro_wear=min(1.0, max(0.0, float(data.get("retro_wear", 0.15)))),
+            retro_enabled=bool(data.get("retro_enabled", True)),
             global_difficulty_scale=max(0.1, float(data.get("global_difficulty_scale", 1.0))),
             create_backups=bool(data.get("create_backups", True)),
             use_local_ai=bool(data.get("use_local_ai", True)),
@@ -91,6 +92,7 @@ class BalancerService:
             "country_multipliers": c.country_multipliers,
             "k_placeable": c.k_placeable, "k_field": c.k_field,
             "k_retro": c.k_retro, "retro_wear": c.retro_wear,
+            "retro_enabled": c.retro_enabled,
             "global_difficulty_scale": c.global_difficulty_scale,
             "create_backups": c.create_backups, "use_local_ai": c.use_local_ai,
             "ai_model_name": c.ai_model_name, "scan_target": c.scan_target.name,
@@ -117,6 +119,7 @@ class BalancerService:
             "country_multipliers": c.country_multipliers,
             "k_placeable": c.k_placeable, "k_field": c.k_field,
             "k_retro": c.k_retro, "retro_wear": c.retro_wear,
+            "retro_enabled": c.retro_enabled,
             "global_difficulty_scale": c.global_difficulty_scale,
             "create_backups": c.create_backups, "use_local_ai": c.use_local_ai,
             "ai_model_name": c.ai_model_name, "scan_target": c.scan_target.name,
@@ -140,7 +143,7 @@ class BalancerService:
                         "retro_wear", "global_difficulty_scale",
                         "field_max_distance", "field_distance_spread")
         BOOL_FIELDS = ("use_additional_currencies", "create_backups",
-                       "use_local_ai", "adjust_field_prices")
+                       "use_local_ai", "adjust_field_prices", "retro_enabled")
         for k, v in (patch or {}).items():
             if k in FLOAT_FIELDS:
                 try:
@@ -360,7 +363,7 @@ class BalancerService:
             base_eur, k_country, s.is_retro, self.cfg)
         s.base_price = clean_round(base_eur * xm)
         s.country_mult, s.retro_mult = k_country, k_retro
-        s.wear_mult = 1.0 + float(self.cfg.retro_wear) if s.is_retro else 1.0
+        s.wear_mult = 1.0 + float(self.cfg.retro_wear) if (s.is_retro and self.cfg.retro_enabled) else 1.0
 
         if s.unique_key in self.overrides:
             s.new_price = int(self.overrides[s.unique_key])

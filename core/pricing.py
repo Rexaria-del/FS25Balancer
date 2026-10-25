@@ -152,7 +152,7 @@ def field_price(area_ha: float, distance_km: Optional[float],
 def apply_item_multipliers(base_eur: float, country_mult: float,
                            is_retro: bool, cfg: BalancerConfig) -> Tuple[float, float, float]:
     """Цена = база * коэф.страны * коэф.ретро. Возвращает (цена, k_country, k_retro)."""
-    k_retro = float(cfg.k_retro) if is_retro else 1.0
+    k_retro = float(cfg.k_retro) if (is_retro and cfg.retro_enabled) else 1.0
     price = base_eur * country_mult * k_retro
     return price, country_mult, k_retro
 
@@ -160,6 +160,7 @@ def apply_item_multipliers(base_eur: float, country_mult: float,
 def motor_price_for_delta(base_eur: float, hp_delta: float, bm: float,
                           xm: float, is_retro: bool, cfg: BalancerConfig) -> int:
     """Наценка комплектации: дельта л.с. + 2% базы (как в balance_configs v13)."""
+    is_retro = bool(is_retro) and cfg.retro_enabled
     if hp_delta > 0:
         p = hp_delta * 215 * bm + base_eur * 0.02
     else:
@@ -171,4 +172,4 @@ def motor_price_for_delta(base_eur: float, hp_delta: float, bm: float,
 
 def wear_for_item(is_retro: bool, cfg: BalancerConfig) -> float:
     """Коэффициент износа ретро: повышает ежедневное содержание."""
-    return 1.0 + float(cfg.retro_wear) if is_retro else 1.0
+    return 1.0 + float(cfg.retro_wear) if (is_retro and cfg.retro_enabled) else 1.0

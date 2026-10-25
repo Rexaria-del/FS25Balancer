@@ -321,7 +321,7 @@ def process_xml_root(root: ET.Element, rel_path: str, mod_name: str,
             country, flag, k_country, is_retro = "—", "🏗", 1.0, False
             review, reason = False, "Здание: бренд не указан"
 
-        k_retro_eff = float(cfg.k_retro) if is_retro else 1.0
+        k_retro_eff = float(cfg.k_retro) if (is_retro and cfg.retro_enabled) else 1.0
         if overrides and ukey in overrides:
             new_xml = int(overrides[ukey])
             base_eur = new_xml / (k_country * k_retro_eff * xm)
@@ -379,7 +379,7 @@ def process_xml_root(root: ET.Element, rel_path: str, mod_name: str,
     country, flag, k_country, is_retro, review, reason = detect_country_and_retro(
         brand, title, rel_path, mod_name, cfg, get_learned())
 
-    k_retro_eff = float(cfg.k_retro) if is_retro else 1.0
+    k_retro_eff = float(cfg.k_retro) if (is_retro and cfg.retro_enabled) else 1.0
     wear = wear_for_item(is_retro, cfg)
 
     if overrides and ukey in overrides:
