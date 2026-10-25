@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FS25 Автобалансировщик v15</title>
+<link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+
+<!-- ═══ ЗАГРУЗОЧНЫЙ ЭКРАН ═══ -->
+<div id="boot" class="boot">
+  <div class="boot-card">
+    <div class="boot-logo">FS<span>25</span></div>
+    <div class="boot-name">Автобалансировщик цен</div>
+    <div class="boot-bar"><i></i></div>
+    <div class="boot-hint">инициализация модуля расчётов…</div>
+  </div>
+</div>
+
+<!-- ═══ ОСНОВНАЯ ОБОЛОЧКА ═══ -->
+<div class="shell" id="shell" hidden>
+
+  <!-- Сайдбар -->
+  <aside class="side">
+    <div class="brand">
+      <div class="brand-mark">FS<span>25</span></div>
+      <div class="brand-txt"><b>Balancer</b><i id="verTag">v15.0</i></div>
+    </div>
+    <nav class="nav" id="nav">
+      <button class="nav-i is-on" data-view="scan"><span class="ic">◈</span>Скан и таблица</button>
+      <button class="nav-i" data-view="countries"><span class="ic">🌍</span>Страны</button>
+      <button class="nav-i" data-view="settings"><span class="ic">⚙</span>Настройки</button>
+      <button class="nav-i" data-view="pro"><span class="ic">★</span>PRO-режим</button>
+      <button class="nav-i" data-view="ai"><span class="ic">🤖</span>ИИ / Ollama</button>
+    </nav>
+    <div class="side-foot">
+      <button class="btn btn-ghost sm" id="clBtn" title="Что нового">📋 История</button>
+      <button class="btn btn-ghost sm" id="tourBtn" title="Интерактивный тур">🎓 Обучение</button>
+    </div>
+  </aside>
+
+  <!-- Основной контент -->
+  <main class="main">
+
+    <!-- ── ВКЛАДКА: СКАН И ТАБЛИЦА ── -->
+    <section class="view is-on" id="view-scan">
+      <div class="topbar">
+        <div class="topbar-l">
+          <input class="dir-input" id="modsDir" placeholder="Путь к папке mods…" readonly>
+          <button class="btn btn-ghost sm" id="btnDir" title="Выбрать папку">📁</button>
+          <select class="sel sm" id="scanTarget">
+            <option value="ALL">📦 Всё</option>
+            <option value="VEHICLES">🚜 Техника</option>
+            <option value="PLACEABLES">🏗️ Здания</option>
+            <option value="FIELDS">🌾 Поля</option>
+          </select>
+        </div>
+        <div class="topbar-r">
+          <button class="btn btn-accent" id="btnScan">▶ Сканировать</button>
+          <button class="btn btn-green" id="btnRecalc">⟳ Обновить цены</button>
+          <button class="btn btn-amber" id="btnApply" disabled>💾 Применить</button>
+          <button class="btn btn-red" id="btnStop" disabled>⏹</button>
+        </div>
+      </div>
+
+      <div class="progress-wrap" id="progressWrap" hidden>
+        <div class="progress-bar"><i id="progressFill"></i></div>
+        <span class="progress-lbl" id="progressLbl"></span>
+      </div>
+
+      <!-- Фильтры и поиск -->
+      <div class="filters">
+        <div class="filter-group">
+          <button class="fbtn is-on" data-filter="all">Все</button>
+          <button class="fbtn" data-filter="vehicle">🚜 Техника</button>
+          <button class="fbtn" data-filter="placeable">🏗️ Здания</button>
+          <button class="fbtn" data-filter="field">🌾 Поля</button>
+          <button class="fbtn" data-filter="retro">🕰 Ретро</button>
+          <button class="fbtn" data-filter="review">⚠️ Проверить</button>
+        </div>
+        <input class="search" id="searchInput" placeholder="Поиск по названию, бренду, моду…">
+        <span class="shown-count" id="shownCount"></span>
+      </div>
+
+      <!-- Статистика -->
+      <div class="stats-row">
+        <div class="stat-chip"><b id="statVeh">0</b><i>🚜</i></div>
+        <div class="stat-chip"><b id="statPlace">0</b><i>🏗️</i></div>
+        <div class="stat-chip"><b id="statField">0</b><i>🌾</i></div>
+        <div class="stat-chip"><b id="statRetro">0</b><i>🕰</i></div>
+        <div class="stat-chip"><b id="statTime">0</b><i>сек</i></div>
+      </div>
+
+      <!-- Таблица -->
+      <div class="table-wrap">
+        <table class="tbl">
+          <thead>
+            <tr>
+              <th class="c-type"></th>
+              <th class="c-title">Название</th>
+              <th class="c-brand">Бренд</th>
+              <th class="c-country">Страна</th>
+              <th class="c-retro">Ретро</th>
+              <th class="c-specs">Характеристики</th>
+              <th class="c-old">Старая</th>
+              <th class="c-new">Новая</th>
+              <th class="c-rub">₽</th>
+              <th class="c-motors">Компл.</th>
+              <th class="c-act"></th>
+            </tr>
+          </thead>
+          <tbody id="tbody"></tbody>
+        </table>
+        <div class="empty" id="empty" hidden>
+          <div class="empty-ic">📦</div>
+          <div class="empty-txt">Нет данных. Укажи папку mods и нажми «Сканировать».</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── ВКЛАДКА: СТРАНЫ ── -->
+    <section class="view" id="view-countries">
+      <h2 class="view-title">🌍 Пул стран</h2>
+      <p class="view-sub">Выбранные страны определяют работу ИИ и словарей брендов. Техника вне пула помечается «⚠️ Проверить».</p>
+      <div class="card">
+        <div class="ms" id="countrySelect">
+          <div class="ms-head" id="msHead">
+            <div class="ms-tags" id="msTags"></div>
+            <span class="ms-count" id="countryCount"></span>
+            <span class="ms-arrow">▾</span>
+          </div>
+          <div class="ms-drop" id="msDrop" hidden></div>
+        </div>
+      </div>
+      <h3 class="section-title">Коэффициенты стран</h3>
+      <p class="view-sub">Множитель цены для каждой выбранной страны. 1.0 = базовая цена Запада.</p>
+      <div class="card" id="countryMults"></div>
+    </section>
+
+    <!-- ── ВКЛАДКА: НАСТРОЙКИ ── -->
+    <section class="view" id="view-settings">
+      <h2 class="view-title">⚙ Настройки</h2>
+      <div class="card grid-2">
+        <div class="set-group">
+          <label>Курс доп. валюты (за 1 €)</label>
+          <input type="number" class="inp" id="rate" value="100" min="1" step="1">
+        </div>
+        <div class="set-group">
+          <label>Глобальный масштаб сложности</label>
+          <input type="number" class="inp" id="gScale" value="1.0" min="0.1" step="0.1">
+        </div>
+        <div class="set-group">
+          <label>Коэф. зданий</label>
+          <input type="number" class="inp" id="kPlace" value="1.0" min="0.05" step="0.05">
+        </div>
+        <div class="set-group">
+          <label>Коэф. полей</label>
+          <input type="number" class="inp" id="kField" value="1.0" min="0.05" step="0.05">
+        </div>
+        <div class="set-group chk">
+          <input type="checkbox" id="addCurr" checked>
+          <label for="addCurr">Использовать доп. валюту</label>
+        </div>
+        <div class="set-group chk">
+          <input type="checkbox" id="backup" checked>
+          <label for="backup">Создавать бэкапы перед применением</label>
+        </div>
+      </div>
+
+      <h3 class="section-title">🕰 Ретро-техника</h3>
+      <div class="card grid-2">
+        <div class="set-group">
+          <label>Коэффициент цены ретро <span class="val" id="kRetroVal">0.65</span></label>
+          <input type="range" class="slider" id="kRetro" min="0" max="1" step="0.01" value="0.65">
+        </div>
+        <div class="set-group">
+          <label>Коэффициент износа ретро <span class="val" id="retroWearVal">0.15</span></label>
+          <input type="range" class="slider" id="retroWear" min="0" max="1" step="0.01" value="0.15">
+        </div>
+      </div>
+
+      <h3 class="section-title">🌾 Поля и расстояние</h3>
+      <div class="card">
+        <div class="set-group chk">
+          <input type="checkbox" id="fieldToggle">
+          <label for="fieldToggle">Изменять цены на поля по расстоянию до магазина</label>
+        </div>
+        <div class="grid-2" id="fieldOpts" hidden>
+          <div class="set-group">
+            <label>Макс. дистанция (км) <span class="val" id="fieldMaxDistVal">3.0</span></label>
+            <input type="range" class="slider" id="fieldMaxDist" min="0.5" max="10" step="0.1" value="3">
+          </div>
+          <div class="set-group">
+            <label>Разброс цены у магазина <span class="val" id="fieldSpreadVal">45%</span></label>
+            <input type="range" class="slider" id="fieldSpread" min="0" max="1" step="0.01" value="0.45">
+          </div>
+          <div class="set-group">
+            <label>Координата магазина X</label>
+            <input type="number" class="inp" id="shopX" value="0" step="1">
+          </div>
+          <div class="set-group">
+            <label>Координата магазина Z</label>
+            <input type="number" class="inp" id="shopZ" value="0" step="1">
+          </div>
+        </div>
+        <p class="hint" id="fieldHint">Включи переключатель и укажи координаты магазина на карте. Чем ближе поле — тем дороже.</p>
+      </div>
+    </section>
+
+    <!-- ── ВКЛАДКА: PRO-РЕЖИМ ── -->
+    <section class="view" id="view-pro">
+      <h2 class="view-title">★ PRO-режим</h2>
+      <div class="card">
+        <h3 class="section-title">Системный промпт ИИ</h3>
+        <textarea class="ta" id="proPrompt" rows="10" placeholder="Промпт для классификации…"></textarea>
+        <div class="btn-row">
+          <button class="btn btn-accent sm" id="btnProSave">💾 Сохранить PRO</button>
+          <button class="btn btn-ghost sm" id="btnProReset">↺ Сбросить</button>
+        </div>
+      </div>
+      <div class="card">
+        <h3 class="section-title">Бренды по странам</h3>
+        <p class="view-sub">Список брендов для детекции страны. Выбери страну слева — редактируй список справа.</p>
+        <div class="pro-brands">
+          <div class="brand-tabs" id="brandTabs"></div>
+          <div class="brand-edit">
+            <div class="brand-list" id="brandList"></div>
+            <div class="brand-add">
+              <input class="inp" id="brandInput" placeholder="Новый бренд…">
+              <button class="btn btn-accent sm" id="btnBrandAdd">+</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── ВКЛАДКА: ИИ / OLLAMA ── -->
+    <section class="view" id="view-ai">
+      <h2 class="view-title">🤖 Локальный ИИ (Ollama)</h2>
+      <div class="card">
+        <div class="ai-status" id="aiStatus">Проверка…</div>
+        <div class="grid-2">
+          <div class="set-group">
+            <label>Модель</label>
+            <input class="inp" id="aiModel" value="phi3">
+          </div>
+          <div class="btn-row">
+            <button class="btn btn-green sm" id="btnAiStart">▶ Запустить</button>
+            <button class="btn btn-red sm" id="btnAiStop">⏹ Остановить</button>
+            <button class="btn btn-accent sm" id="btnAiDl">⬇ Скачать модель</button>
+          </div>
+        </div>
+        <div class="set-group chk">
+          <input type="checkbox" id="useAi" checked>
+          <label for="useAi">Использовать ИИ для классификации</label>
+        </div>
+        <div id="aiList"></div>
+      </div>
+      <div class="card">
+        <h3 class="section-title">Управление памятью</h3>
+        <div class="btn-row">
+          <button class="btn btn-red sm" id="btnClearMem">🗑 Очистить всю память</button>
+          <button class="btn btn-ghost sm" id="btnRestore">↺ Восстановить бэкапы</button>
+        </div>
+      </div>
+    </section>
+
+  </main>
+</div>
+
+<!-- ═══ МОДАЛЬНОЕ ОКНО ═══ -->
+<div class="modal-overlay" id="modal" hidden>
+  <div class="modal-card">
+    <div class="modal-head"><span id="modalTitle">Редактирование</span><button class="modal-x" id="modalX">×</button></div>
+    <div class="modal-body" id="modalBody"></div>
+    <div class="modal-foot">
+      <button class="btn btn-ghost sm" id="modalCancel">Отмена</button>
+      <button class="btn btn-accent sm" id="modalSave">Сохранить</button>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ МОДАЛКА ИСТОРИИ ОБНОВЛЕНИЙ ═══ -->
+<div class="modal-overlay" id="clModal" hidden>
+  <div class="modal-card wide">
+    <div class="modal-head"><span>📋 История обновлений</span><button class="modal-x" id="clClose">×</button></div>
+    <div class="modal-body cl-body" id="clBody"></div>
+  </div>
+</div>
+
+<!-- ═══ ИНТЕРАКТИВНЫЙ ТУР ═══ -->
+<div class="tour-overlay" id="tourCard" hidden>
+  <div class="tour-card">
+    <div class="tour-step" id="tourStep">1/8</div>
+    <h3 class="tour-title" id="tourTitle"></h3>
+    <p class="tour-text" id="tourText"></p>
+    <div class="tour-dots" id="tourDots"></div>
+    <div class="tour-btns">
+      <button class="btn btn-ghost sm" id="tourSkip">Пропустить</button>
+      <button class="btn btn-accent sm" id="tourNext">Далее →</button>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ КОНТЕКСТНОЕ МЕНЮ ═══ -->
+<div class="ctx" id="ctxMenu" hidden></div>
+
+<!-- ═══ ВЫПАДАЮЩИЙ СПИСОК СТРАН (по двойному клику) ═══ -->
+<div class="dd" id="dd" hidden></div>
+
+<!-- ═══ ТУЛТИП ═══ -->
+<div class="ttx" id="ttx" hidden></div>
+
+<!-- ═══ ТОСТЫ ═══ -->
+<div class="toast-wrap" id="toasts"></div>
+
+<script src="js/app.js"></script>
+</body>
+</html>
