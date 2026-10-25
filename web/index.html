@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>FS25 Автобалансировщик v15</title>
 <meta http-equiv="Cache-Control" content="no-store">
-<link rel="stylesheet" href="css/app.css?v=15.2">
+<link rel="stylesheet" href="css/app.css?v=15.3">
 <script>
 window.__jsErrors = [];
 window.addEventListener("error", function (e) {
@@ -117,7 +117,7 @@ setInterval(function () {
         <div class="thead">
           <span class="c-type"></span><span class="c-mod">Мод</span><span class="c-name">Название</span><span class="c-brand">Бренд</span>
           <span class="c-country">Страна</span><span class="c-retro">Ретро</span><span class="c-specs">Хар-ки</span><span class="c-old">Старая</span>
-          <span class="c-base">База</span><span class="c-new">Новая</span><span class="c-rub">₽</span><span class="c-src">Источник</span>
+          <span class="c-base">База</span><span class="c-new" id="thNew">Новая</span><span class="c-rub" id="thRub">₽</span><span class="c-src">Источник</span>
         </div>
         <div class="tbody" id="tbody"></div>
         <div class="empty" id="empty" hidden>
@@ -132,15 +132,20 @@ setInterval(function () {
       <div class="grid2">
         <div class="card">
           <h3>Общие коэффициенты</h3>
-          <div class="field"><label>Глобальный масштаб сложности <span class="val" id="vGds">1.00</span></label>
-            <input type="range" id="gds" min="0.1" max="3" step="0.01" value="1"></div>
+          <p class="dim sm">Глобальной «сложности» больше нет: общий множитель задаётся отдельно для каждой страны во вкладке <b>Страны</b>.</p>
           <div class="field"><label>Коэф. зданий <span class="val" id="vPlace">1.00</span></label>
             <input type="range" id="place" min="0.05" max="3" step="0.01" value="1"></div>
           <div class="field"><label>Коэф. полей <span class="val" id="vField">1.00</span></label>
             <input type="range" id="fieldK" min="0.05" max="3" step="0.01" value="1"></div>
-          <div class="field"><label>Курс доп. валюты (за 1 €)</label>
-            <input type="number" id="rate" value="100" min="1" step="1"></div>
-          <label class="switch"><input type="checkbox" id="addCurr" checked><span class="track"><i></i></span><em>Использовать доп. валюту</em></label>
+          <div class="cur-block">
+            <div class="cur-head">💱 Валюта в моде <span class="cur-badge" id="curBadge">₽ напрямую</span></div>
+            <label class="switch"><input type="checkbox" id="acMod"><span class="track"><i></i></span><em>В папке mods установлен мод Additional Currencies</em></label>
+            <label class="switch"><input type="checkbox" id="acConv"><span class="track"><i></i></span><em>В игре включена опция «Конвертировать валюты»</em></label>
+            <div class="field"><label>Курс ₽ за 1 € <span class="dim sm" id="rateSrc"></span></label>
+              <input type="number" id="rate" value="112.66" min="1" max="100000" step="0.01"></div>
+            <div class="btnrow"><button class="btn btn-ghost sm" id="btnAcDetect">🔎 Найти мода и курс автоматически</button></div>
+            <div class="cur-note" id="curNote"></div>
+          </div>
           <label class="switch"><input type="checkbox" id="backups" checked><span class="track"><i></i></span><em>Создавать бэкапы перед применением</em></label>
         </div>
         <div class="card" id="retroCard">
@@ -182,6 +187,12 @@ setInterval(function () {
       </div>
       <div class="card">
         <h3>Коэффициенты стран</h3>
+        <p class="dim sm">Личный множитель для каждой выбранной страны — он заменяет прежний глобальный коэффициент сложности. Применяется к технике и зданиям этой страны при каждом пересчёте цены.</p>
+        <div class="mult-tools">
+          <input type="text" id="multSearch" placeholder="Поиск страны…">
+          <button class="mini" id="btnMultAll">Показать все страны</button>
+          <button class="mini" id="btnMultDefault">↺ Дефолты стран</button>
+        </div>
         <div class="mult-list" id="multList"></div>
         <div class="btnrow">
           <button class="btn btn-accent sm" id="btnSaveCountries">💾 Сохранить пул стран</button>
@@ -275,6 +286,6 @@ setInterval(function () {
 <div class="toast-wrap" id="toasts"></div>
 <div class="logbar"><span class="dot"></span><span id="logText" class="dim">готов</span></div>
 
-<script src="js/app.js?v=15.2"></script>
+<script src="js/app.js?v=15.3"></script>
 </body>
 </html>

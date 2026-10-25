@@ -36,6 +36,8 @@ CHANGELOG = [
         "Активная модель: дропдаун готовых моделей вместо ручного ввода; единый прогресс и мягкий финальный звук для всех процессов",
         "Поля: базовая цена считается по площади, итоговая — с надбавкой за близость к магазину",
         "Список готовых моделей читается с диска, если служба Ollama остановлена",
+        "Валюта: переключатель мода Additional Currencies + конвертера, запись цен в ₽ напрямую или €-базой; автодетект курса из currencies.xml",
+        "Глобальный коэффициент сложности заменён индивидуальным коэффициентом каждой выбранной страны",
         "История обновлений в приложении",
     ]},
     {"v": "14.0", "date": "2026-10-20", "items": [
@@ -89,6 +91,7 @@ class Api:
                 "countries": countries_payload(),
                 "groups": dict(GROUP_LABELS),
                 "config": self._svc.config_payload(),
+                "currency": self._svc.detect_currency(apply=True),
                 "pro": self._svc.pro_payload(),
                 "changelog": CHANGELOG,
                 "ai": self._ai_status(),
@@ -112,6 +115,14 @@ class Api:
         try:
             self._svc.update_config(patch)
             return {"ok": True, "config": self._svc.config_payload()}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def detect_currency(self) -> dict:
+        """Автопоиск мода Additional Currencies и его курса ₽ за 1 €."""
+        try:
+            info = self._svc.detect_currency(apply=True, force=True)
+            return {"ok": True, "info": info, "config": self._svc.config_payload()}
         except Exception as e:
             return {"ok": False, "error": str(e)}
 

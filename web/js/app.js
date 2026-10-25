@@ -79,6 +79,22 @@ function chime(kind) {
   } catch (e) { /* украшение, не критично */ }
 }
 
+/* JS-ошибки иначе исчезают молча: пересылаем их в python-лог (crash.log) и показываем тост */
+function reportJsError(where, e) {
+  const msg = (e && (e.message || e.reason)) || String(e);
+  const file = (e && (e.filename || e.sourceURL)) || "";
+  const line = e && (e.lineno || e.line || e.lineNumber) ? ":" + (e.lineno || e.line || e.lineNumber) : "";
+  const txt = "[js-error] " + where + " " + msg + " @" + file + line;
+  try { call("log", txt); } catch (err) {}
+  try { console.error(txt); } catch (err) {}
+  if (!window.__jsErrToast) {
+    window.__jsErrToast = 1;
+    setTimeout(() => toast("err", "Ошибка интерфейса: " + msg, 9000), 900);
+  }
+}
+window.addEventListener("error", e => reportJsError("window", e));
+window.addEventListener("unhandledrejection", e => reportJsError("promise", (e && e.reason) || e));
+
 function log(text, state) {
   const bar = $(".logbar");
   $("#logText").textContent = text;
@@ -274,13 +290,14 @@ function fillScanTargets(list, current) {
 }
 
 function applyConfigToUI(c) {
-  $("#gds").value = c.global_difficulty_scale;
   $("#place").value = c.k_placeable;
   $("#fieldK").value = c.k_field;
   $("#retroK").value = Math.round(c.k_retro * 100);
   $("#wearK").value = Math.round(c.retro_wear * 100);
-  $("#addCurr").checked = !!c.use_additional_currencies;
+  $("#acMod").checked = !!c.ac_mod_installed;
+  $("#acConv").checked = !!c.ac_converter;
   $("#rate").value = c.exchange_rate;
+  updateCurrencyUI(c);
   $("#adjFields").checked = !!c.adjust_field_prices;
   $("#retroOn").checked = c.retro_enabled !== false;
   paintRetroState(c.retro_enabled !== false);
@@ -292,15 +309,13 @@ function applyConfigToUI(c) {
   $("#shopX").value = (c.shop_coordinates.shop || [0, 0])[0];
   $("#shopZ").value = (c.shop_coordinates.shop || [0, 0])[1];
   $("#scanTarget").value = c.scan_target;
-  $$("#vGds, #vPlace, #vField").forEach(() => {});
-  $("#vGds").textContent = Number(c.global_difficulty_scale).toFixed(2);
   $("#vPlace").textContent = Number(c.k_placeable).toFixed(2);
   $("#vField").textContent = Number(c.k_field).toFixed(2);
   $("#vRetroK").textContent = Math.round(c.k_retro * 100);
   $("#vWearK").textContent = Math.round(c.retro_wear * 100);
   $("#vMaxD").textContent = Number(c.field_max_distance).toFixed(1);
   $("#vSpread").textContent = Math.round(c.field_distance_spread * 100);
-  ["gds", "place", "fieldK", "retroK", "wearK", "maxD", "spread"].forEach(id => {
+  ["place", "fieldK", "retroK", "wearK", "maxD", "spread"].forEach(id => {
     const p = document.getElementById(id).paintRange; if (p) p();
     document.getElementById(id).dispatchEvent(new Event("input"));
   });
@@ -583,9 +598,11 @@ function renderTable() {
 function priceCell(it) {
   const hasMotors = it.item_type === "vehicle" && it.motor_prices && it.motor_prices.length > 1;
   const manual = it.manual_price != null;
+  const cfg = (S.boot && S.boot.config) || {};
+  const suffix = cfg.write_direct_rubles === false ? " €" : " ₽";
   return `<div class="c-new">
       <button class="price-btn" data-price="${esc(it.unique_key)}" title="${hasMotors ? "Выбрать комплектацию" : "Задать цену вручную"}">
-        <b>${fmt(it.new_price)}</b>${hasMotors ? ' <span class="dim">▾</span>' : ""}${manual ? ' <span title="вручную">✎</span>' : ""}
+        <b>${fmt(it.new_price)}</b><span class="cur">${suffix}</span>${hasMotors ? ' <span class="dim">▾</span>' : ""}${manual ? ' <span title="вручную">✎</span>' : ""}
       </button></div>`;
 }
 
@@ -927,38 +944,114 @@ function syncChecks() {
 $("#btnSaveCountries").onclick = async () => {
   if (!selSet.size) return toast("warn", "Выбери хотя бы одну страну");
   const mults = {};
-  $$("#multList [data-mult]").forEach(i => { mults[i.dataset.mult] = parseFloat(i.value); });
+  $$("#multList [data-mult]").forEach(i => { const v = parseFloat(i.value); if (isFinite(v)) mults[i.dataset.mult] = v; });
   const r = await call("select_countries", [...selSet], mults);
   if (!r || !r.ok) return toast("err", (r && r.error) || "Ошибка сохранения стран");
-  S.boot.config.selected_countries = r.selected;
-  toast("ok", `Пул стран обновлён: ${r.selected.length}`);
+  S.boot.config = r.config || S.boot.config;
+  renderMultList();
+  toast("ok", `Пул стран обновлён: ${r.selected.length}${r.recalc ? " — цены пересчитаны" : ""}`);
 };
 
-/* ── список коэффициентов стран ── */
+/* ── коэффициенты стран: личный множитель каждой выбранной страны ──
+   (пришёл на смену глобальному коэффициенту сложности) */
+S.multAll = S.multAll || false;
+S.multQ = S.multQ || "";
+const clampK = v => { const n = Number(v); return isFinite(n) ? Math.min(10, Math.max(0.05, n)) : 1; };
+
 function renderMultList() {
-  const sel = new Set(S.boot.config.selected_countries || []);
-  const mult = S.boot.config.country_multipliers || {};
-  $("#multList").innerHTML = S.boot.countries.map(c => `
-    <div class="mult-i ${sel.has(c.name) ? "" : "is-off"}" data-row="${esc(c.name)}">
-      <span class="nm"><span>${c.flag}</span><span>${esc(c.name)}</span></span>
-      <input type="range" data-mult="${esc(c.name)}" min="0.1" max="3" step="0.01"
-        value="${mult[c.name] != null ? mult[c.name] : c.k}" ${sel.has(c.name) ? "" : "disabled"}>
-      <span class="val">${fmt2(mult[c.name] != null ? mult[c.name] : c.k)}×</span>
-    </div>`).join("");
-  $$("#multList input[type=range]").forEach(el => {
-    const paint = () => {
-      const min = +el.min, max = +el.max, v = +el.value;
-      el.style.setProperty("--fill", ((v - min) / (max - min) * 100).toFixed(1) + "%");
-      el.closest(".mult-i").querySelector(".val").textContent = fmt2(v) + "×";
-    };
-    el.addEventListener("input", paint); paint();
+  const cfg = S.boot.config || {};
+  const sel = new Set(cfg.selected_countries || []);
+  const mult = cfg.country_multipliers || {};
+  const q = (S.multQ || "").trim().toLowerCase();
+  const rows = (S.boot.countries || []).slice()
+    .filter(c => S.multAll || sel.has(c.name) || (q && c.name.toLowerCase().includes(q)))
+    .sort((a, b) => (sel.has(b.name) ? 1 : 0) - (sel.has(a.name) ? 1 : 0) ||
+                   a.name.localeCompare(b.name, "ru"));
+  const list = $("#multList");
+  if (!rows.length) {
+    list.innerHTML = '<div class="dim sm">Страны не выбраны — отметь нужные в мультиселекте выше и сохрани пул, их коэффициенты появятся здесь.</div>';
+  } else {
+    list.innerHTML = rows.map(c => {
+      const on = sel.has(c.name);
+      const v = clampK(mult[c.name] != null ? mult[c.name] : c.k);
+      return `
+    <div class="mult-i${on ? "" : " is-off"}" data-row="${esc(c.name)}">
+      <span class="nm"><span>${c.flag}</span><span>${esc(c.name)}</span>${on ? "" : ' <em class="dim">вне пула</em>'}</span>
+      <input type="range" data-mult="${esc(c.name)}" min="0.05" max="10" step="0.05" value="${v}"${on ? "" : " disabled"}>
+      <input type="number" class="mult-num" data-muldn="${esc(c.name)}" min="0.05" max="10" step="0.05" value="${v.toFixed(2)}"${on ? "" : " disabled"}>
+      <button class="mini" data-muldef="${esc(c.name)}" title="Дефолт страны ${clampK(c.k).toFixed(2)}×"${on ? "" : " disabled"}>↺</button>
+    </div>`;
+    }).join("");
+  }
+  const bar = (rng, v) => {
+    const min = +rng.min, max = +rng.max;
+    rng.style.setProperty("--fill", ((v - min) / (max - min) * 100).toFixed(1) + "%");
+  };
+  $$("#multList [data-mult]").forEach(rng => {
+    const row = rng.closest(".mult-i"), num = row.querySelector(".mult-num");
+    bar(rng, +rng.value);
+    rng.addEventListener("input", () => { const v = clampK(rng.value); num.value = v.toFixed(2); bar(rng, v); });
+    num.addEventListener("input", () => { const v = clampK(num.value); rng.value = v; bar(rng, v); });
+    num.addEventListener("change", () => {
+      const raw = parseFloat(num.value);
+      if (!isFinite(raw)) { num.classList.add("is-bad"); toast("warn", "Коэффициент — число 0.05…10"); return; }
+      num.classList.remove("is-bad");
+      const v = clampK(raw); num.value = v.toFixed(2); rng.value = v; bar(rng, v);
+    });
   });
+  $$("#multList [data-muldef]").forEach(b => b.onclick = () => {
+    const c = (S.boot.countries || []).find(x => x.name === b.dataset.muldef);
+    if (!c) return;
+    const row = b.closest(".mult-i"), rng = row.querySelector("[data-mult]"), num = row.querySelector(".mult-num");
+    const v = clampK(c.k); rng.value = v; num.value = v.toFixed(2); bar(rng, v);
+    toast("info", `${c.name}: дефолт ${v.toFixed(2)}× — не забудь «Сохранить коэффициенты»`);
+  });
+  const allBtn = $("#btnMultAll");
+  if (allBtn) {
+    allBtn.textContent = S.multAll ? "Только выбранные" : "Показать все страны";
+    allBtn.onclick = () => { S.multAll = !S.multAll; renderMultList(); };
+  }
+  const defBtn = $("#btnMultDefault");
+  if (defBtn) defBtn.onclick = () => {
+    $$("#multList [data-muldef]").forEach(b => b.click());
+    toast("info", "Дефолты проставлены — сохрани коэффициенты");
+  };
+  const si = $("#multSearch");
+  if (si && !si._wired) { si._wired = true; si.addEventListener("input", () => { S.multQ = si.value; renderMultList(); }); }
+}
+
+/* ── валютный блок: что именно ляжет в <price> файла мода ── */
+function updateCurrencyUI(c) {
+  c = c || (S.boot && S.boot.config) || {};
+  const direct = c.write_direct_rubles !== false;   // нет мода ИЛИ выключен конвертер
+  const rate = Number(c.exchange_rate || 0);
+  const ac = $("#acConv");
+  if (ac) {
+    ac.disabled = !c.ac_mod_installed;
+    ac.closest(".switch").classList.toggle("is-dis", !c.ac_mod_installed);
+  }
+  const badge = $("#curBadge");
+  if (badge) {
+    badge.textContent = direct ? "пишем ₽" : "пишем € → игра переведёт в ₽";
+    badge.className = "cur-badge " + (direct ? "is-rub" : "is-eur");
+  }
+  const rs = $("#rateSrc");
+  if (rs) rs.textContent = c.ac_rate_auto ? "— авто из currencies.xml" : "— вручную";
+  const note = $("#curNote");
+  if (note) note.innerHTML = direct
+    ? `В <code>&lt;price&gt;</code> файла мода ложится <b>сумма в рублях</b>: база (EUR-алгоритм) × ${fmt2(rate)}.
+       ${c.ac_mod_installed ? "Мод стоит, но конвертер в игре выключен — значит игра показывает ровно то число, что в файле."
+                            : "Мод Additional Currencies не нужен — игра отобразит это число в своей валюте."}`
+    : `Мод Additional Currencies стоит <b>и</b> конвертер включён: в файл пишем <b>€-базу</b>, а игра сама домножит её на ${fmt2(rate)} и покажет рубли.
+       Писать в этом режиме готовые рубли — двойная конвертация, цены раздует в ${Math.round(rate)} раз.`;
+  const thN = $("#thNew"), thR = $("#thRub");
+  if (thN) thN.textContent = direct ? "Новая ₽" : "Новая €";
+  if (thR) thR.textContent = direct ? "₽ итог" : "₽ (домножит игра)";
 }
 
 /* ── слайдеры настроек ── */
 function bindSettings() {
   const map = [
-    ["gds", "#vGds", v => Number(v).toFixed(2), "global_difficulty_scale"],
     ["place", "#vPlace", v => Number(v).toFixed(2), "k_placeable"],
     ["fieldK", "#vField", v => Number(v).toFixed(2), "k_field"],
     ["retroK", "#vRetroK", v => Math.round(v), "k_retro"],
@@ -981,7 +1074,7 @@ function bindSettings() {
   }
 
   const sw = [
-    ["addCurr", "use_additional_currencies"], ["adjFields", "adjust_field_prices"],
+    ["acMod", "ac_mod_installed"], ["acConv", "ac_converter"], ["adjFields", "adjust_field_prices"],
     ["backups", "create_backups"], ["useAi", "use_local_ai"], ["retroOn", "retro_enabled"],
   ];
   for (const [id, key] of sw) {
@@ -992,6 +1085,10 @@ function bindSettings() {
         if (key === "adjust_field_prices") drawCurve();
         if (key === "retro_enabled") paintRetroState(e.target.checked);
         if (key === "retro_enabled" && S.order.length) guard(call("recalc"));
+        if (key === "ac_mod_installed" || key === "ac_converter") {
+          updateCurrencyUI(r.config);
+          if (S.order.length) guard(call("recalc"));   // режим записи поменял все цены
+        }
       }
       toast(e.target.checked ? "ok" : "info", labelOf(key) + (e.target.checked ? " — вкл" : " — выкл"));
     });
@@ -999,9 +1096,23 @@ function bindSettings() {
   $("#rate").addEventListener("change", async e => {
     const v = clampNum(e.target.value, 1, 100000, NaN);
     if (!isFinite(v)) { markBad("#rate"); return toast("err", "Курс — число от 1 до 100000"); }
-    const r = await call("set_config", { exchange_rate: v });
-    if (r && r.ok) { S.boot.config = r.config; toast("ok", "Курс сохранён: " + v + " за 1 €"); }
+    // ручное значение отключает автоподстановку курса из мода
+    const r = await call("set_config", { exchange_rate: v, ac_rate_auto: false });
+    if (r && r.ok) {
+      S.boot.config = r.config; updateCurrencyUI(r.config);
+      toast("ok", `Курс сохранён: ${v} ₽ за 1 €`);
+      if (S.order.length) guard(call("recalc"));
+    }
   });
+  $("#btnAcDetect").onclick = async () => {
+    const r = await call("detect_currency");
+    if (!r || !r.ok) return toast("err", (r && r.error) || "Не удалось проверить папку mods");
+    S.boot.config = r.config; applyConfigToUI(r.config); updateCurrencyUI(r.config);
+    const i = r.info || {};
+    toast(i.found ? "ok" : "warn",
+      i.found ? `💱 Найден ${i.mod}` + (i.rate ? ` — курс ${fmt2(i.rate)} ₽ за 1 €` + (r.config.ac_rate_auto ? " (из currencies.xml)" : " (твой ручной курс)") : " — рублёвый курс в мода не найден, задай вручную")
+              : "Мод Additional Currencies в папке mods не найден — цены пишутся в рублях напрямую", 6500);
+  };
   ["shopX", "shopZ"].forEach(id => document.getElementById(id).addEventListener("change", async () => {
     const x = clampNum($("#shopX").value, -100000, 100000, NaN);
     const z = clampNum($("#shopZ").value, -100000, 100000, NaN);
@@ -1025,15 +1136,25 @@ function bindSettings() {
   });
   $("#btnSavePrices").onclick = () => {
     const mults = {};
-    $$("#multList [data-mult]").forEach(i => { if (!i.disabled) mults[i.dataset.mult] = parseFloat(i.value); });
+    $$("#multList [data-mult]").forEach(i => {
+      if (i.disabled) return;
+      const v = parseFloat(i.value);
+      if (!isFinite(v)) { toast("err", `Коэффициент ${i.dataset.mult}: нужно число`); return; }
+      mults[i.dataset.mult] = Math.min(10, Math.max(0.05, v));
+    });
     call("select_countries", [...selSet], mults).then(r => {
-      if (r && r.ok) toast("ok", "Коэффициенты и пул стран сохранены");
+      if (r && r.ok) {
+        S.boot.config = r.config || S.boot.config;
+        toast("ok", `Коэффициенты сохранены (${Object.keys(mults).length} стран)` + (r.recalc ? " — цены пересчитаны" : ""));
+        renderMultList();
+      } else toast("err", (r && r.error) || "Не сохранено");
     });
   };
   $("#btnSaveFields").onclick = () => { drawCurve(); toast("ok", "Настройки полей сохранены"); };
 }
 function labelOf(key) {
-  return { use_additional_currencies: "Доп. валюта", adjust_field_prices: "Изменять цены на поля",
+  return { ac_mod_installed: "Мод Additional Currencies", ac_converter: "Конвертер валют в игре",
+           adjust_field_prices: "Изменять цены на поля",
            create_backups: "Резервные копии", use_local_ai: "Определять страну через ИИ",
            retro_enabled: "Режим «Ретро»" }[key] || key;
 }
@@ -1192,23 +1313,25 @@ document.addEventListener("mousemove", e => {
 
 /* ── интерактивное обучение (пошаговый тур с подсветкой) ── */
 const TOUR = [
-  { sel: "#btnScan", title: "Шаг 1 · Сканирование",
+  { sel: "#btnScan", title: "Сканирование",
     text: "Укажи папку mods и нажми «Сканировать». Программа прочитает modDesc.xml и XML техники, зданий и полей — файлы при этом не меняются." },
-  { sel: "#btnRecalc", title: "Шаг 2 · Обновить цены",
+  { sel: "#btnRecalc", title: "Обновить цены",
     text: "Кнопка пересчитывает цены по текущим коэффициентам и ретро-настройкам БЕЗ повторного сканирования — изменения видны мгновенно." },
-  { sel: '[data-view="countries"]', title: "Шаг 3 · Пул стран",
-    text: "Выбери страны, которые вообще допустимы. ИИ и словари брендов не выйдут за этот пул: всё сомнительное попадёт в фильтр «Проверить»." },
-  { sel: ".thead .c-country", title: "Шаг 4 · Смена региона",
+  { sel: '[data-view="countries"]', title: "Пул стран",
+    text: "Выбери страны, которые вообще допустимы. ИИ и словари брендов не выйдут за этот пул: всё сомнительное попадёт в фильтр «Проверить». Ниже — отдельный коэффициент цены для каждой выбранной страны: он заменил прежний глобальный масштаб сложности." },
+  { sel: ".thead .c-country", title: "Смена региона",
     text: "Двойной клик по стране в строке — анимированный список стран. Выбор запоминается для бренда и сразу пересчитывает цену." },
-  { sel: ".thead .c-retro", title: "Шаг 5 · Ретро-тумблер",
+  { sel: ".thead .c-retro", title: "Ретро-тумблер",
     text: "Переключатель в строке делает технику ретро: цена умножается на коэффициент ретро, а dailyUpkeep — на коэффициент износа." },
-  { sel: ".thead .c-new", title: "Шаг 6 · Комплектации",
+  { sel: ".thead .c-new", title: "Комплектации",
     text: "Клик по цене откроет список комплектаций двигателя с разными л.с. и ценами; «Своя цена / правка ТТХ» — ручной ввод характеристик." },
-  { sel: '[data-view="fields"]', title: "Шаг 7 · Поля и расстояние",
+  { sel: '[data-view="fields"]', title: "Поля и расстояние",
     text: "Включи «Изменять цены на поля» и укажи координаты магазина: чем ближе поле, тем дороже. Если площадь или дистанция не определились — строка попадёт на ручное подтверждение." },
-  { sel: "#btnApply", title: "Шаг 8 · Применить",
+  { sel: "#btnApply", title: "Применить",
     text: "Только после «Применить» программа перепишет файлы модов. Резервные копии складываются в _backup_original_mods." },
-  { sel: "#aiModelCur", view: "pro", title: "Шаг 9 · Локальный ИИ",
+  { sel: "#curBadge", view: "prices", title: "Валюта и рубли",
+    text: "Программа всегда считает цену в рублях. Переключатели решают, что ляжет в файл мода: без мода Additional Currencies (или с выключенным конвертером) — сразу рубли; если мод стоит и конвертер включён — база в €, а игра сама домножит её на курс мода. Кнопка «Найти мода и курс автоматически» читает currencies.xml прямо из папки mods." },
+  { sel: "#aiModelCur", view: "pro", title: "Локальный ИИ",
     text: "Клик по плашке «Активная модель» — выпадающий список только тех моделей, что уже скачаны и готовы к работе. Ручного ввода больше нет: выбрать можно реально установленное. Новые модели ставятся кнопкой «установить и использовать» в каталоге ниже, там видно %, скорость и статус ⚡ GPU / ≡ CPU." },
 ];
 let tourHole = null;
@@ -1268,7 +1391,7 @@ function placeTour() {
   const el = $(step.sel);
   if (!el || !el.getBoundingClientRect().width) { S.tourStep++; return placeTour(); }
   if (step.view) el.scrollIntoView({ block: "center" });
-  $("#tourTitle").textContent = step.title;
+  $("#tourTitle").textContent = "Шаг " + (S.tourStep + 1) + " из " + TOUR.length + " · " + step.title;
   $("#tourText").textContent = step.text;
   $("#tourDots").innerHTML = TOUR.map((_, i) => `<i class="${i === S.tourStep ? "is-on" : ""}"></i>`).join("");
   $("#tourNext").textContent = S.tourStep === TOUR.length - 1 ? "Готово" : "Далее";
@@ -1327,6 +1450,10 @@ const CHANGELOG = [
     "Единый анимированный прогресс-бар для скана, пересчёта, записи в моды, скачивания и установки; мягкий звук в конце процесса",
     "Поля: колонка «Базовая» = чистая цена по площади, итоговая = с надбавкой за близость к магазину (видно размер надбавки)",
     "Дропдаун готовых моделей видит модели на диске, даже когда служба Ollama остановлена (через манифесты ~/.ollama/models)",
+    "Валюта: отдельный переключатель мода Additional Currencies + переключатель конвертера; prices пишутся в ₽ напрямую либо как €-база, если игра конвертирует сама",
+    "Автодетект мода и рублёвого курса из currencies.xml в папке mods (112.66 по умолчанию)",
+    "Глобальный коэффициент сложности убран: у каждой выбранной страны свой множитель 0.05–10 с числовым полем, поиском и сбросом к дефолту",
+    "Смена курса, валютного режима или пула стран автоматически пересчитывает цены",
   ]},
   { v: "14.0", date: "2026-10-18", title: "World Edition (Tkinter)", items: [
     "Страны мира вместо трёх регионов, флаги и коэффициенты",

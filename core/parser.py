@@ -258,8 +258,7 @@ def process_xml_root(root: ET.Element, rel_path: str, mod_name: str,
     brand = (sd.findtext("brand") or "GENERIC").strip()
     ukey = f"{mod_name}::{rel_path}"
 
-    xm = 1.0 if cfg.use_additional_currencies else cfg.exchange_rate
-    dm = cfg.exchange_rate if cfg.use_additional_currencies else 1.0
+    xm = cfg.xml_factor
 
     is_field = is_field_xml(root, category, rel_path)
     is_place = is_placeable_xml(root, category, rel_path)
@@ -296,7 +295,7 @@ def process_xml_root(root: ET.Element, rel_path: str, mod_name: str,
             base_eur = field_price(area if area_ok else 0.0, dist, cfg)
             new_xml = clean_round(base_eur * xm)
 
-        new_rub = clean_round(base_eur * dm)
+        new_rub = clean_round(cfg.rubles(base_eur))
         if write:
             price_el.text = str(new_xml)
 
@@ -337,7 +336,7 @@ def process_xml_root(root: ET.Element, rel_path: str, mod_name: str,
                 base_eur, k_country, is_retro, cfg)
             new_xml = clean_round(priced * xm)
 
-        new_rub = clean_round(base_eur * k_country * k_retro_eff * dm)
+        new_rub = clean_round(cfg.rubles(base_eur * k_country * k_retro_eff))
         if write:
             price_el.text = str(new_xml)
             upkeep = sd.find("dailyUpkeep")
@@ -397,7 +396,7 @@ def process_xml_root(root: ET.Element, rel_path: str, mod_name: str,
             eur_raw, k_country, is_retro, cfg)
         new_xml = clean_round(priced * xm)
 
-    new_rub = clean_round(new_xml / xm * dm)
+    new_rub = clean_round(cfg.rubles(new_xml / xm)) if xm else new_xml
 
     if write:
         price_el.text = str(new_xml)
@@ -554,8 +553,7 @@ def recalc_specs(specs: List[ItemSpec], cfg: BalancerConfig,
                  ) -> List[ItemSpec]:
     """Пересчёт БЕЗ повторного сканирования: использует кэш извлечённых ТТХ."""
     out: List[ItemSpec] = []
-    xm = 1.0 if cfg.use_additional_currencies else cfg.exchange_rate
-    dm = cfg.exchange_rate if cfg.use_additional_currencies else 1.0
+    xm = cfg.xml_factor
 
     for s in specs:
         c = raw_cache.get(s.unique_key)
@@ -569,7 +567,7 @@ def recalc_specs(specs: List[ItemSpec], cfg: BalancerConfig,
             base_eur = field_price(area, dist, cfg)
             s.base_price = clean_round(field_price(area, None, cfg) * xm)
             s.new_price = int(overrides.get(s.unique_key, clean_round(base_eur * xm)))
-            s.new_price_rub = clean_round(base_eur * dm)
+            s.new_price_rub = clean_round(cfg.rubles(base_eur))
             s.country_mult = cfg.k_field
             if s.field_manual:
                 s.needs_review = s.field_area <= 0 or (cfg.adjust_field_prices
@@ -588,7 +586,7 @@ def recalc_specs(specs: List[ItemSpec], cfg: BalancerConfig,
             s.country_mult, s.retro_mult = k_c, k_r
             s.wear_mult = wear_for_item(s.is_retro, cfg)
             s.new_price = int(overrides.get(s.unique_key, clean_round(priced * xm)))
-            s.new_price_rub = clean_round(priced * dm)
+            s.new_price_rub = clean_round(cfg.rubles(priced))
             out.append(s)
             continue
 
@@ -608,7 +606,7 @@ def recalc_specs(specs: List[ItemSpec], cfg: BalancerConfig,
             s.new_price = int(overrides[s.unique_key])
         else:
             s.new_price = clean_round(priced * xm)
-        s.new_price_rub = clean_round(s.new_price / xm * dm) if xm else s.new_price
+        s.new_price_rub = clean_round(cfg.rubles(s.new_price / xm)) if xm else s.new_price
 
         cnt = 0
         s.motor_prices = []

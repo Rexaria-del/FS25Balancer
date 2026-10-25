@@ -59,8 +59,11 @@ class BalancerService:
         tgt_name = str(data.get("scan_target", "ALL")).upper()
         tgt = getattr(ScanTarget, tgt_name, ScanTarget.ALL)
         self.cfg = BalancerConfig(
-            use_additional_currencies=bool(data.get("use_additional_currencies", True)),
-            exchange_rate=max(1.0, float(data.get("exchange_rate", 100.0))),
+            ac_mod_installed=bool(data.get("ac_mod_installed", False)),
+            ac_converter=bool(data.get("ac_converter", True)),
+            ac_rate_auto=bool(data.get("ac_rate_auto", True)),
+            ac_manual=bool(data.get("ac_manual", False)),
+            exchange_rate=min(100000.0, max(1.0, float(data.get("exchange_rate", 112.66) or 112.66))),
             country_multipliers={str(k): float(v) for k, v in
                                  (data.get("country_multipliers") or {}).items()},
             k_placeable=max(0.05, float(data.get("k_placeable", 1.0))),
@@ -68,7 +71,6 @@ class BalancerService:
             k_retro=min(1.0, max(0.0, float(data.get("k_retro", 0.65)))),
             retro_wear=min(1.0, max(0.0, float(data.get("retro_wear", 0.15)))),
             retro_enabled=bool(data.get("retro_enabled", True)),
-            global_difficulty_scale=max(0.1, float(data.get("global_difficulty_scale", 1.0))),
             create_backups=bool(data.get("create_backups", True)),
             use_local_ai=bool(data.get("use_local_ai", True)),
             ai_model_name=str(data.get("ai_model_name", "phi3")),
@@ -87,13 +89,13 @@ class BalancerService:
     def save_settings(self) -> None:
         c = self.cfg
         storage.save_json(storage.SETTINGS_FILE, {
-            "use_additional_currencies": c.use_additional_currencies,
+            "ac_mod_installed": c.ac_mod_installed, "ac_converter": c.ac_converter,
+            "ac_rate_auto": c.ac_rate_auto, "ac_manual": c.ac_manual,
             "exchange_rate": c.exchange_rate,
             "country_multipliers": c.country_multipliers,
             "k_placeable": c.k_placeable, "k_field": c.k_field,
             "k_retro": c.k_retro, "retro_wear": c.retro_wear,
             "retro_enabled": c.retro_enabled,
-            "global_difficulty_scale": c.global_difficulty_scale,
             "create_backups": c.create_backups, "use_local_ai": c.use_local_ai,
             "ai_model_name": c.ai_model_name, "scan_target": c.scan_target.name,
             "adjust_field_prices": c.adjust_field_prices,
@@ -114,13 +116,15 @@ class BalancerService:
     def config_payload(self) -> Dict[str, Any]:
         c = self.cfg
         return {
-            "use_additional_currencies": c.use_additional_currencies,
+            "ac_mod_installed": c.ac_mod_installed, "ac_converter": c.ac_converter,
+            "ac_rate_auto": c.ac_rate_auto, "ac_manual": c.ac_manual,
             "exchange_rate": c.exchange_rate,
+            "write_direct_rubles": c.write_direct_rubles,
+            "xml_factor": c.xml_factor,
             "country_multipliers": c.country_multipliers,
             "k_placeable": c.k_placeable, "k_field": c.k_field,
             "k_retro": c.k_retro, "retro_wear": c.retro_wear,
             "retro_enabled": c.retro_enabled,
-            "global_difficulty_scale": c.global_difficulty_scale,
             "create_backups": c.create_backups, "use_local_ai": c.use_local_ai,
             "ai_model_name": c.ai_model_name, "scan_target": c.scan_target.name,
             "scan_target_label": SCAN_TARGET_LABELS.get(c.scan_target, "Всё"),
@@ -139,23 +143,34 @@ class BalancerService:
     def update_config(self, patch: Dict[str, Any]) -> None:
         """Применяет патч из фронтенда к BalancerConfig и сохраняет."""
         c = self.cfg
-        FLOAT_FIELDS = ("exchange_rate", "k_placeable", "k_field", "k_retro",
-                        "retro_wear", "global_difficulty_scale",
-                        "field_max_distance", "field_distance_spread")
-        BOOL_FIELDS = ("use_additional_currencies", "create_backups",
+        # границы обязательны: значения приходят из слайдеров и number-полей
+        FLOAT_FIELDS = {
+            "exchange_rate": (1.0, 100000.0),
+            "k_placeable": (0.05, 10.0), "k_field": (0.05, 10.0),
+            "k_retro": (0.0, 1.0), "retro_wear": (0.0, 1.0),
+            "field_max_distance": (0.1, 20.0), "field_distance_spread": (0.0, 1.0),
+        }
+        BOOL_FIELDS = ("ac_mod_installed", "ac_converter", "ac_rate_auto", "ac_manual", "create_backups",
                        "use_local_ai", "adjust_field_prices", "retro_enabled")
         for k, v in (patch or {}).items():
             if k in FLOAT_FIELDS:
+                lo, hi = FLOAT_FIELDS[k]
                 try:
-                    setattr(c, k, max(0.0, float(v)))
+                    f = float(v)
                 except (TypeError, ValueError):
-                    pass
+                    continue
+                if f != f or f in (float("inf"), float("-inf")):
+                    continue
+                setattr(c, k, min(hi, max(lo, f)))
             elif k in BOOL_FIELDS:
                 setattr(c, k, bool(v))
+                if k in ("ac_mod_installed", "ac_converter"):
+                    c.ac_manual = True   # больше не спорить с пользователем при автодетекте
             elif k == "ai_model_name" and isinstance(v, str) and v.strip():
                 c.ai_model_name = v.strip()
             elif k == "mods_dir" and isinstance(v, str) and v.strip():
                 c.mods_dir = v.strip()
+                self.detect_currency(apply=True)
             elif k == "scan_target" and isinstance(v, str):
                 try:
                     c.scan_target = ScanTarget[v.upper()]
@@ -171,13 +186,7 @@ class BalancerService:
                 except (TypeError, ValueError):
                     pass
             elif k == "country_multipliers" and isinstance(v, dict):
-                out = {}
-                for cn, mv in v.items():
-                    try:
-                        out[str(cn)] = float(mv)
-                    except (TypeError, ValueError):
-                        pass
-                c.country_multipliers = out
+                c.country_multipliers = self._clean_multipliers(v)
         self.save_settings()
 
     def pro_payload(self) -> Dict[str, Any]:
@@ -352,8 +361,7 @@ class BalancerService:
             self._recalc_field(s)
             return
         c = self._raw(s)
-        xm = 1.0 if self.cfg.use_additional_currencies else self.cfg.exchange_rate
-        dm = self.cfg.exchange_rate if self.cfg.use_additional_currencies else 1.0
+        xm = self.cfg.xml_factor
         cat = c.get("category") or s.category
         if s.item_type == "placeable":
             base_eur = calc_placeable_price(cat, s.title, s.xml_rel_path,
@@ -377,7 +385,7 @@ class BalancerService:
             s.new_price = int(self.overrides[s.unique_key])
         else:
             s.new_price = clean_round(priced * xm)
-        s.new_price_rub = clean_round(priced * dm) if dm else s.new_price
+        s.new_price_rub = clean_round(self.cfg.rubles(priced))
 
         if s.item_type == "vehicle" and s.motors:
             base_hp = c.get("hp", s.hp)
@@ -493,14 +501,50 @@ class BalancerService:
         return {"ok": False, "error": "Поле не найдено"}
 
     def _recalc_field(self, s: ItemSpec) -> None:
-        xm = 1.0 if self.cfg.use_additional_currencies else self.cfg.exchange_rate
+        xm = self.cfg.xml_factor
         dist = None if s.field_distance < 0 else s.field_distance
         area = s.field_area if s.field_area > 0 else 0.0
         base = field_price(area, dist, self.cfg)
         s.base_price = clean_round(field_price(area, None, self.cfg) * xm)
         if s.unique_key not in self.overrides:
             s.new_price = clean_round(base * xm)
-        s.new_price_rub = clean_round(base * self.cfg.exchange_rate)
+        s.new_price_rub = clean_round(self.cfg.rubles(base))
+
+    @staticmethod
+    def _clean_multipliers(raw: Dict[str, Any]) -> Dict[str, float]:
+        """Только известные страны и числа в диапазоне 0.05..10 (защита от мусора из UI)."""
+        known = _known()
+        out: Dict[str, float] = {}
+        for cn, mv in (raw or {}).items():
+            name = str(cn)
+            if name not in known:
+                continue
+            try:
+                f = float(mv)
+            except (TypeError, ValueError):
+                continue
+            if f != f or f in (float("inf"), float("-inf")):
+                continue
+            out[name] = min(10.0, max(0.05, f))
+        return out
+
+    def detect_currency(self, apply: bool = True, force: bool = False) -> Dict[str, Any]:
+        """Ищет мод Additional Currencies в папке mods и подтягивает его рублёвый курс.
+
+        force=True — явная кнопка пользователя; иначе ручной выбор стран(ы) мода не перетирается.
+        """
+        from core import currency
+        info = currency.detect(self.cfg.mods_dir)
+        if apply and (force or not self.cfg.ac_manual):
+            self.cfg.ac_mod_installed = bool(info.get("found"))
+            if info.get("rate") and self.cfg.ac_rate_auto:
+                self.cfg.exchange_rate = float(info["rate"])
+            self.save_settings()
+        info["applied"] = bool(apply)
+        info["manual"] = bool(self.cfg.ac_manual)
+        info["write_direct_rubles"] = self.cfg.write_direct_rubles if apply else \
+            (not (bool(info.get("found")) and self.cfg.ac_converter))
+        return info
 
     def update_pro(self, custom_prompt: str, country_brands: Dict[str, List[str]]) -> Dict[str, Any]:
         pro = get_pro_data()
@@ -518,9 +562,18 @@ class BalancerService:
             return {"ok": False, "error": "Выберите хотя бы одну страну"}
         set_selected(clean)
         self.cfg.selected_countries = clean
-        self.cfg.country_multipliers = {str(k): float(v) for k, v in (multipliers or {}).items()}
+        merged = dict(self.cfg.country_multipliers or {})
+        merged.update(self._clean_multipliers(multipliers or {}))
+        # у каждой выбранной страны обязан быть свой коэффициент — вместо
+        # прежнего глобального масштаба сложности
+        from core.countries import country_info
+        for cn in clean:
+            merged.setdefault(cn, float(country_info(cn)["k"]))
+        self.cfg.country_multipliers = {cn: merged[cn] for cn in clean}
         self.save_settings()
-        return {"ok": True, "selected": clean}
+        rescan = self.recalculate() if self.specs else {"ok": False}
+        return {"ok": True, "selected": clean, "recalc": bool(rescan.get("ok")),
+                "config": self.config_payload()}
 
     def clear_memory(self) -> Dict[str, Any]:
         clear_caches()
@@ -533,10 +586,9 @@ class BalancerService:
 
 
 def clean_round_rub(price_xml: int, cfg: BalancerConfig) -> int:
-    xm = 1.0 if cfg.use_additional_currencies else cfg.exchange_rate
-    if xm <= 0:
-        xm = 1.0
-    return clean_round(price_xml / xm * cfg.exchange_rate)
+    """Рубли из числа, лежашего в XML (там либо уже ₽, либо EUR-база)."""
+    xm = cfg.xml_factor or 1.0
+    return clean_round(cfg.rubles(price_xml / xm))
 
 
 def _raw_of(s: ItemSpec) -> Dict[str, Any]:

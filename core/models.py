@@ -23,8 +23,14 @@ SCAN_TARGET_LABELS = {
 
 @dataclass
 class BalancerConfig:
-    use_additional_currencies: bool = True
-    exchange_rate: float = 100.0
+    # Две независимые вещи: стоит ли мод Additional Currencies и включён ли в игре
+    # его конвертер. Пишем рубли напрямую, если мода нет ИЛИ конвертер выключен.
+    ac_mod_installed: bool = False
+    ac_converter: bool = True
+    exchange_rate: float = 112.66      # ₽ за 1 €, по умолчанию курс из мода AC
+    ac_rate_auto: bool = True          # курс подставлен автодетектом, а не вручную
+    ac_manual: bool = False            # пользователь сам трогал переключатель мода
+    use_additional_currencies: bool = True   # LEGACY: только для чтения старых настроек
     country_multipliers: Dict[str, float] = field(default_factory=dict)
     k_placeable: float = 1.0
     k_field: float = 1.0
@@ -42,6 +48,20 @@ class BalancerConfig:
     shop_coordinates: Dict[str, Tuple[float, float]] = field(default_factory=dict)
     selected_countries: List[str] = field(default_factory=list)
     mods_dir: str = ""
+
+    @property
+    def write_direct_rubles(self) -> bool:
+        """В <price> ложится рублёвая сумма (без мода AC или с выключенным конвертером)."""
+        return not (self.ac_mod_installed and self.ac_converter)
+
+    @property
+    def xml_factor(self) -> float:
+        """Множитель EUR-базы -> число, которое пишем в XML."""
+        return self.exchange_rate if self.write_direct_rubles else 1.0
+
+    def rubles(self, eur_value: float) -> float:
+        """Рубли для отображения: всегда база в EUR * курс (не зависит от режима записи)."""
+        return float(eur_value) * self.exchange_rate
 
     def multiplier_for(self, country: str) -> float:
         from core.countries import country_info
