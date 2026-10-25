@@ -88,14 +88,16 @@ $$(".nav-i").forEach(b => {
 
 /* ── кинематографичная заставка (стиль Ubisoft) ── */
 S.introDone = false;
+let _fxRAF = 0;
 let _introRes = null;
 const _introP = new Promise(r => { _introRes = r; });
 
 function finishIntro() {
   if (S.introDone) return;
   S.introDone = true;
+  if (_fxRAF) cancelAnimationFrame(_fxRAF);
   const el = $("#intro");
-  if (el) { el.classList.add("is-out"); setTimeout(() => el.remove(), 900); }
+  if (el) { el.classList.add("is-out"); setTimeout(() => el.remove(), 550); }
   if (_introRes) _introRes();
 }
 
@@ -105,14 +107,51 @@ function startIntro() {
   const el = $("#intro");
   if (!el) return finishIntro();
   $("#inTitle").innerHTML = "FS25 BALANCER".split("").map((ch, i) =>
-    `<span style="animation-delay:${(1.15 + i * 0.055).toFixed(2)}s">${ch === " " ? "&nbsp;" : esc(ch)}</span>`).join("");
-  let g = "";
-  for (let i = 0; i < 90; i++) g += `<i style="left:${(Math.random() * 100).toFixed(1)}%;top:${(Math.random() * 100).toFixed(1)}%;animation-delay:${(Math.random() * 1.8).toFixed(2)}s;animation-duration:${(2.2 + Math.random() * 2.2).toFixed(2)}s"></i>`;
-  $("#inGrid").innerHTML = g;
-  setTimeout(finishIntro, 4300);
+    `<span style="animation-delay:${(1.55 + i * 0.05).toFixed(2)}s">${ch === " " ? "&nbsp;" : esc(ch)}</span>`).join("");
+  introFx();
+  const par = $("#inPar");
+  el.addEventListener("mousemove", e => {
+    const r = el.getBoundingClientRect();
+    const dx = (e.clientX - r.width / 2) / r.width, dy = (e.clientY - r.height / 2) / r.height;
+    if (par) par.style.transform = `translate3d(${(dx * 16).toFixed(1)}px, ${(dy * 10).toFixed(1)}px, 0) rotateY(${(dx * 5).toFixed(2)}deg) rotateX(${(-dy * 3.5).toFixed(2)}deg)`;
+  });
+  setTimeout(finishIntro, 5300);
   const skip = () => { finishIntro(); document.removeEventListener("click", skip); document.removeEventListener("keydown", skip); };
   document.addEventListener("click", skip);
   document.addEventListener("keydown", skip);
+}
+
+/* Космо-частицы: летящая на камеру глубина (z-buffer), живой параллакс */
+function introFx() {
+  const cv = $("#inFx");
+  if (!cv || !cv.getContext) return;
+  const ctx = cv.getContext("2d");
+  let W = cv.width = innerWidth, H = cv.height = innerHeight;
+  addEventListener("resize", () => { W = cv.width = innerWidth; H = cv.height = innerHeight; });
+  const N = 160;
+  const pts = Array.from({ length: N }, () => ({ z: Math.random(), a: Math.random() * 6.283, r: 0.15 + Math.random() * 0.9 }));
+  const hues = ["140,160,255", "120,220,255", "200,160,255", "255,255,255"];
+  const t0 = performance.now();
+  const loop = t => {
+    if (S.introDone) return;
+    const dt = (t - t0) / 1000;
+    ctx.clearRect(0, 0, W, H);
+    const fade = Math.min(1, dt * 0.8);
+    for (let i = 0; i < N; i++) {
+      const p = pts[i];
+      const z = ((p.z - dt * 0.11) % 1 + 1) % 1;
+      const sp = 1 / (z * 6 + 0.12);
+      const x = W / 2 + Math.cos(p.a + dt * 0.05) * p.r * W * 0.55 * sp * 0.32;
+      const y = H * 0.5 + Math.sin(p.a + dt * 0.05) * p.r * H * 0.45 * sp * 0.32;
+      if (x < -20 || x > W + 20 || y < -20 || y > H + 20) continue;
+      const s = Math.max(0.4, 2.6 * sp * 0.5);
+      const al = Math.min(0.9, (1 - z) * 0.95) * fade;
+      ctx.fillStyle = `rgba(${hues[i % 4]},${al.toFixed(3)})`;
+      ctx.beginPath(); ctx.arc(x, y, s, 0, 6.283); ctx.fill();
+    }
+    _fxRAF = requestAnimationFrame(loop);
+  };
+  _fxRAF = requestAnimationFrame(loop);
 }
 
 /* ── загрузка ── */
@@ -1144,6 +1183,8 @@ const CHANGELOG = [
     "Фиксы: колесо мыши, кэш WebView2, обучающий тур, ложный тост о мосте",
     "Кинематографичная заставка в стиле Ubisoft (клик — пропустить)",
     "Фиксы: галочка тура врезана в карточку, достижимая прокрутка до низа",
+    "Один общий скролл на вкладке, заметная переливающаяся пульсация рекомендации",
+    "Заставка уровня кинотитров: космо-частицы, неоновый пол, орбита, глитч букв, вспышка-кат",
   ]},
   { v: "14.0", date: "2026-10-18", title: "World Edition (Tkinter)", items: [
     "Страны мира вместо трёх регионов, флаги и коэффициенты",
