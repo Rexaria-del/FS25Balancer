@@ -274,6 +274,7 @@ class BalancerService:
         if not self.specs:
             return {"ok": False, "error": "Нет данных: сначала выполните сканирование"}
         self.busy = True
+        emit("recalc_start", {"total": len(self.specs)})
         threading.Thread(target=self._recalc_worker, daemon=True).start()
         return {"ok": True}
 
@@ -283,8 +284,11 @@ class BalancerService:
             with self._lock:
                 updated = recalc_specs(self.specs, self.cfg, self.overrides, self.raw_cache)
                 self.specs = updated
-            for s in updated:
+            n = max(1, len(updated))
+            for i, s in enumerate(updated, 1):
                 emit("item", s.to_dict())
+                if i == n or i % 10 == 0:
+                    emit("progress", {"current": i, "total": n, "item": s.title})
             self.stats.elapsed = round(time.time() - t0, 1)
             emit("recalc_done", {"items": len(updated),
                                  "elapsed": self.stats.elapsed,
@@ -302,6 +306,7 @@ class BalancerService:
         if not self.specs:
             return {"ok": False, "error": "Нет данных для применения"}
         self.busy = True
+        emit("applied_start", {"total": len(self.specs)})
         threading.Thread(target=self._apply_worker, daemon=True).start()
         return {"ok": True}
 
@@ -310,9 +315,12 @@ class BalancerService:
         backup_dir = os.path.join(mods_dir, "_backup_original_mods")
         done = 0
         try:
-            for s in list(self.specs):
+            items = list(self.specs)
+            n = max(1, len(items))
+            for i, s in enumerate(items, 1):
                 if self._stop.is_set():
                     break
+                emit("progress", {"current": i, "total": n, "item": s.mod_name})
                 mod_path = os.path.join(mods_dir, s.mod_name)
                 overrides = {**self.overrides, s.unique_key: int(s.new_price)}
                 cfg = self.cfg
@@ -487,10 +495,11 @@ class BalancerService:
     def _recalc_field(self, s: ItemSpec) -> None:
         xm = 1.0 if self.cfg.use_additional_currencies else self.cfg.exchange_rate
         dist = None if s.field_distance < 0 else s.field_distance
-        base = field_price(s.field_area if s.field_area > 0 else 0.0, dist, self.cfg)
-        s.base_price = clean_round(base * xm)
+        area = s.field_area if s.field_area > 0 else 0.0
+        base = field_price(area, dist, self.cfg)
+        s.base_price = clean_round(field_price(area, None, self.cfg) * xm)
         if s.unique_key not in self.overrides:
-            s.new_price = s.base_price
+            s.new_price = clean_round(base * xm)
         s.new_price_rub = clean_round(base * self.cfg.exchange_rate)
 
     def update_pro(self, custom_prompt: str, country_brands: Dict[str, List[str]]) -> Dict[str, Any]:

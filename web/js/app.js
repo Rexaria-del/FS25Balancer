@@ -51,6 +51,34 @@ function toast(kind, text, ms) {
   setTimeout(() => { el.classList.add("is-out"); setTimeout(() => el.remove(), 260); }, ms || 3400);
 }
 
+let _ac = null;
+/* Мягкий обволакивающий финальный аккорд (успех) или поникший дуэт (ошибка) */
+function chime(kind) {
+  try {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    _ac = _ac || new AC();
+    if (_ac.state === "suspended") _ac.resume();
+    const ac = _ac, t0 = ac.currentTime;
+    const master = ac.createGain();
+    master.gain.setValueAtTime(0.0001, t0);
+    master.gain.linearRampToValueAtTime(kind === "err" ? 0.07 : 0.09, t0 + 0.06);
+    master.gain.exponentialRampToValueAtTime(0.0001, t0 + 2.1);
+    const lp = ac.createBiquadFilter(); lp.type = "lowpass"; lp.frequency.value = 2200; lp.Q.value = 0.6;
+    lp.connect(master); master.connect(ac.destination);
+    const notes = kind === "err" ? [392.0, 311.13] : [523.25, 659.25, 783.99, 1046.5];
+    notes.forEach((f, i) => {
+      const o = ac.createOscillator(); o.type = "sine"; o.frequency.value = f;
+      const g = ac.createGain();
+      const st = t0 + i * (kind === "err" ? 0.16 : 0.13);
+      g.gain.setValueAtTime(0.0001, st);
+      g.gain.linearRampToValueAtTime(1 - i * 0.16, st + 0.05);
+      g.gain.exponentialRampToValueAtTime(0.0001, t0 + 2.0);
+      o.connect(g); g.connect(lp); o.start(st); o.stop(t0 + 2.1);
+    });
+  } catch (e) { /* украшение, не критично */ }
+}
+
 function log(text, state) {
   const bar = $(".logbar");
   $("#logText").textContent = text;
@@ -260,7 +288,7 @@ function applyConfigToUI(c) {
   $("#spread").value = Math.round(c.field_distance_spread * 100);
   $("#backups").checked = !!c.create_backups;
   $("#useAi").checked = !!c.use_local_ai;
-  $("#aiModel").value = c.ai_model_name;
+  { const t = $("#aiModelCurTxt"); if (t && c.ai_model_name) t.textContent = c.ai_model_name; }
   $("#shopX").value = (c.shop_coordinates.shop || [0, 0])[0];
   $("#shopZ").value = (c.shop_coordinates.shop || [0, 0])[1];
   $("#scanTarget").value = c.scan_target;
@@ -328,6 +356,7 @@ function handleEvent(ev) {
       flushRows();
       setBusy(false);
       $("#progress").hidden = true;
+      if (!d.aborted) chime("ok");
       if (d.stats) S.boot.config.stats = d.stats;
       updateStats();
       log(d.aborted ? "Прервано" : (d.apply ? "Цены записаны в моды" : "Сканирование завершено"),
@@ -340,8 +369,18 @@ function handleEvent(ev) {
         S.boot.uncertain = d.uncertain;
       }
       break;
+    case "recalc_start":
+      setBusy(true, "Пересчёт цен…");
+      $("#progress").hidden = false;
+      break;
+    case "applied_start":
+      setBusy(true, "Запись в моды…");
+      $("#progress").hidden = false;
+      break;
     case "recalc_done":
       setBusy(false);
+      $("#progress").hidden = true;
+      chime("ok");
       flushRows();
       renderTable();
       log(`Цены пересчитаны: ${d.items} позиций за ${d.elapsed} с (без скана)`, "ok");
@@ -349,6 +388,8 @@ function handleEvent(ev) {
       break;
     case "applied":
       setBusy(false);
+      $("#progress").hidden = true;
+      if (!d.aborted) chime("ok");
       log(d.aborted ? "Применение прервано" : `Записано в моды: ${d.count} позиций`, d.aborted ? "warn" : "ok");
       toast(d.aborted ? "warn" : "ok", d.aborted ? "Применение прервано" : `💾 Готово: изменено ${d.count} файлов позиций`);
       break;
@@ -370,6 +411,7 @@ function handleEvent(ev) {
     case "ai_done":
       setBusy(false);
       const pb = $("#aiProgress"); if (pb) pb.hidden = true;
+      if (!/ошиб|не удал|не удалось/i.test(d.msg || "")) chime("ok"); else chime("err");
       toast("info", d.msg || "Готово", 6000);
       checkAi();
       break;
@@ -444,16 +486,8 @@ function renderAiCatalog() {
             <button class="mini danger" data-del="${esc(n)}">🗑 удалить</button>
           </span></div>`; }).join("") : "") +
       `<div class="hr"></div>
-      <div class="dim sm">Быстрый выбор установленной модели:</div>
-      <div class="dl-cur" id="aiQuickCur"><span>${esc(st.current || "не выбрана")}</span><b>▾</b></div>` +
-      bindQuickDl(inst) +
-      `<div class="hr"></div>
-      <div class="dim sm">Или любой тег из библиотеки Ollama:</div>
-      <div style="display:flex;gap:8px"><input type="text" id="aiModelCustom" placeholder="например mistral:latest" value="${esc(st.current || "")}">
-      <button class="mini" id="btnCustomSetup">настроить</button></div>
       <div class="btnrow"><button class="mini danger" id="btnAiUninstall">🗑 Удалить Ollama из системы</button></div>`;
-  const qc = $("#aiQuickCur");
-  if (qc) qc.onclick = e => { e.stopPropagation(); const dl = $("#aiModelDl"); if (dl) dl.hidden = !dl.hidden; };
+  renderModelDl(inst, st.current);
   $$("#aiList [data-sort]").forEach(b => b.onclick = () => { S.aiSort = b.dataset.sort; renderAiCatalog(); });
   $$("#aiList [data-use]").forEach(b => b.onclick = async () => {
     const r = await call("set_config", { ai_model_name: b.dataset.use, use_local_ai: true });
@@ -465,8 +499,6 @@ function renderAiCatalog() {
     const r = await call("ai_delete", b.dataset.del);
     if (r && r.ok) toast("info", "Удаляю " + b.dataset.del + " — следи за журналом");
   });
-  const bc = $("#btnCustomSetup");
-  if (bc) bc.onclick = () => { const v = $("#aiModelCustom").value.trim(); if (v) aiOneClick(v); else toast("warn", "Введите тег модели"); };
   const bu = $("#btnAiUninstall");
   if (bu) bu.onclick = async () => {
     if (!confirm("Удалить Ollama из системы? Запустится тихий деинсталлятор; папка со скачанными моделями (%USERPROFILE%\\.ollama) останется — снесёшь её руками при желании.")) return;
@@ -475,17 +507,28 @@ function renderAiCatalog() {
   };
 }
 
-function bindQuickDl(inst) {
-  const dl = $("#aiModelDl");
-  if (!dl) return "";
-  if (!inst.length) { dl.hidden = true; return '<div class="dim sm" style="margin-top:6px">Пока ничего не установлено — нажми «⬇ установить и использовать» у модели ниже.</div>'; }
-  dl.innerHTML = inst.map(n => `<div class="dl-o" data-q="${esc(n)}">${esc(n)}</div>`).join("");
+/* Дропдаун активной модели: только реально установленные и готовые к работе теги.
+   Ручной ввод убран — выбор возможен исключительно из списка, опечатка невозможна. */
+function renderModelDl(inst, current) {
+  const cur = $("#aiModelCur"), dl = $("#aiModelDl"), txt = $("#aiModelCurTxt");
+  if (!cur || !dl) return;
+  if (txt) txt.textContent = current || (inst.length ? "выбери модель из списка" : "моделей не установлено — скачай в каталоге ниже");
+  cur.classList.toggle("is-off", !inst.length);
+  dl.hidden = true;
+  if (!inst.length) { dl.innerHTML = ""; return; }
+  dl.innerHTML = inst.map(n => `<div class="dl-o${n === current ? " is-on" : ""}" data-q="${esc(n)}">` +
+    `${n === current ? "&#10003; " : ""}<b>${esc(n)}</b><em class="dl-o-note">${n === (current || "") ? "активна" : "готов к работе"}</em></div>`).join("");
   $$("#aiModelDl .dl-o").forEach(o => o.onclick = async () => {
     dl.hidden = true;
     const r = await call("set_config", { ai_model_name: o.dataset.q, use_local_ai: true });
-    if (r && r.ok) { toast("ok", "Модель выбрана: " + o.dataset.q); $("#aiModel").value = o.dataset.q; checkAi(); }
+    if (r && r.ok) {
+      toast("ok", "Модель выбрана: " + o.dataset.q);
+      S.boot.config.ai_model_name = o.dataset.q;
+      S.ai.current = o.dataset.q;
+      renderAiCatalog();
+    }
   });
-  return "";
+  cur.onclick = e => { e.stopPropagation(); if (inst.length) dl.hidden = !dl.hidden; };
 }
 
 async function refreshStatuses() {
@@ -980,10 +1023,6 @@ function bindSettings() {
     const r = await call("set_config", { scan_target: e.target.value });
     if (r && r.ok) S.boot.config = r.config;
   });
-  $("#aiModel").addEventListener("change", async e => {
-    const r = await call("set_config", { ai_model_name: e.target.value });
-    if (r && r.ok) S.boot.config = r.config;
-  });
   $("#btnSavePrices").onclick = () => {
     const mults = {};
     $$("#multList [data-mult]").forEach(i => { if (!i.disabled) mults[i.dataset.mult] = parseFloat(i.value); });
@@ -1084,7 +1123,7 @@ $("#btnClearMem").onclick = async () => {
 };
 $("#btnAiStart").onclick = async () => { const r = await call("ai_start"); toast(r && r.ok ? "ok" : "warn", r && r.ok ? "Служба ИИ запущена" : "Не удалось запустить Ollama"); checkAi(); };
 $("#btnAiStop").onclick = async () => { await call("ai_stop"); toast("info", "Служба ИИ остановлена"); checkAi(); };
-$("#btnAiDl").onclick = async () => { const m = $("#aiModel").value.trim(); if (m) { await call("ai_download", m); toast("info", "Скачивание " + m + " — следи за логом внизу"); } };
+$("#btnAiRefresh").onclick = async () => { await checkAi(); toast("info", "Список готовых моделей обновлён"); };
 
 /* ── кнопки верхней панели ── */
 $("#btnScan").onclick = () => guard(call("scan", false));
@@ -1169,6 +1208,8 @@ const TOUR = [
     text: "Включи «Изменять цены на поля» и укажи координаты магазина: чем ближе поле, тем дороже. Если площадь или дистанция не определились — строка попадёт на ручное подтверждение." },
   { sel: "#btnApply", title: "Шаг 8 · Применить",
     text: "Только после «Применить» программа перепишет файлы модов. Резервные копии складываются в _backup_original_mods." },
+  { sel: "#aiModelCur", view: "pro", title: "Шаг 9 · Локальный ИИ",
+    text: "Клик по плашке «Активная модель» — выпадающий список только тех моделей, что уже скачаны и готовы к работе. Ручного ввода больше нет: выбрать можно реально установленное. Новые модели ставятся кнопкой «установить и использовать» в каталоге ниже, там видно %, скорость и статус ⚡ GPU / ≡ CPU." },
 ];
 let tourHole = null;
 
@@ -1222,8 +1263,11 @@ function placeTour() {
   if (step.sel.startsWith(".thead") && !$("#view-scan").classList.contains("is-on")) {
     showView("scan");
   }
+  // шаг из другой вкладки: сначала сделать её активной, иначе rect = 0 и рамка улетает в угол
+  if (step.view && !$("#view-" + step.view).classList.contains("is-on")) showView(step.view);
   const el = $(step.sel);
-  if (!el) { S.tourStep++; return placeTour(); }
+  if (!el || !el.getBoundingClientRect().width) { S.tourStep++; return placeTour(); }
+  if (step.view) el.scrollIntoView({ block: "center" });
   $("#tourTitle").textContent = step.title;
   $("#tourText").textContent = step.text;
   $("#tourDots").innerHTML = TOUR.map((_, i) => `<i class="${i === S.tourStep ? "is-on" : ""}"></i>`).join("");
@@ -1279,6 +1323,10 @@ const CHANGELOG = [
     "Заставка уровня кинотитров: космо-частицы, неоновый пол, орбита, глитч букв, вспышка-кат",
     "Звук заставки: мягкий кинематографичный эмбиент (синтез, без файлов)",
     "Прогресс скачивания моделей: %, скорость МБ/с, размер; дропдаун только установленных; статус GPU/CPU/VRAM по каждой модели",
+    "Активная модель — выпадающий список готовых к работе моделей вместо ручного ввода",
+    "Единый анимированный прогресс-бар для скана, пересчёта, записи в моды, скачивания и установки; мягкий звук в конце процесса",
+    "Поля: колонка «Базовая» = чистая цена по площади, итоговая = с надбавкой за близость к магазину (видно размер надбавки)",
+    "Дропдаун готовых моделей видит модели на диске, даже когда служба Ollama остановлена (через манифесты ~/.ollama/models)",
   ]},
   { v: "14.0", date: "2026-10-18", title: "World Edition (Tkinter)", items: [
     "Страны мира вместо трёх регионов, флаги и коэффициенты",

@@ -288,7 +288,11 @@ def process_xml_root(root: ET.Element, rel_path: str, mod_name: str,
         if overrides and ukey in overrides:
             new_xml = int(overrides[ukey])
             base_eur = new_xml / xm
+            plain_eur = base_eur
         else:
+            # plain_eur — чистая база по площади (без расстояния), base_eur — с бонусом
+            # за близость к магазину. В таблице видно «база → итог» именно как надбавку.
+            plain_eur = field_price(area if area_ok else 0.0, None, cfg)
             base_eur = field_price(area if area_ok else 0.0, dist, cfg)
             new_xml = clean_round(base_eur * xm)
 
@@ -301,7 +305,7 @@ def process_xml_root(root: ET.Element, rel_path: str, mod_name: str,
             title=title, brand=brand, category="field",
             category_label="Поле", country="—", country_flag="🌾",
             old_price=old_price, new_price=new_xml, new_price_rub=new_rub,
-            base_price=clean_round(base_eur * xm),
+            base_price=clean_round(plain_eur * xm),
             field_area=area if area_ok else 0.0,
             field_distance=(dist if dist is not None else -1.0),
             field_coord=coord, needs_review=bool(reasons),
@@ -563,8 +567,8 @@ def recalc_specs(specs: List[ItemSpec], cfg: BalancerConfig,
             area = s.field_area if s.field_area > 0 else c.get("area", 0.0)
             dist = None if s.field_distance < 0 else s.field_distance
             base_eur = field_price(area, dist, cfg)
-            s.base_price = clean_round(base_eur * xm)
-            s.new_price = int(overrides.get(s.unique_key, s.base_price))
+            s.base_price = clean_round(field_price(area, None, cfg) * xm)
+            s.new_price = int(overrides.get(s.unique_key, clean_round(base_eur * xm)))
             s.new_price_rub = clean_round(base_eur * dm)
             s.country_mult = cfg.k_field
             if s.field_manual:

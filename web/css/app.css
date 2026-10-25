@@ -696,3 +696,22 @@ input[type=range]:active::-webkit-slider-thumb { transform: scale(1.05); }
 .vram-badge.is-gpu { color: #6ee7b7; border-color: rgba(52,211,153,.5); background: rgba(52,211,153,.12); }
 .vram-badge.is-cpu { color: #fcd34d; border-color: rgba(251,191,36,.5); background: rgba(251,191,36,.1); }
 .vram-badge.is-idle { color: var(--dim); }
+
+
+/* ── v15.1g: unified прогресс, chime-зона, готовый дропдаун ── */
+.prog-fill { position: relative; overflow: hidden; }
+.prog-fill::after { content: ""; position: absolute; inset: 0; transform: translateX(-100%);
+  background: linear-gradient(90deg, transparent, rgba(255,255,255,.4), transparent);
+  animation: progShimmer 1.25s var(--ease) infinite; }
+@keyframes progShimmer { to { transform: translateX(100%); } }
+.dl-o.is-on { color: #c7d2fe; background: rgba(99,102,241,.14); font-weight: 600; }
+.dl-cur.is-off { opacity: .5; cursor: default; }
+
+/* ── v15.2: карточка ИИ без ручного ввода ── */
+.field .dl-cur { margin: 0; }
+.dl-o { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.dl-o b { font-weight: 600; }
+.dl-o-note { font-style: normal; font-size: 10.5px; color: var(--dim);
+  border: 1px solid var(--line); border-radius: 999px; padding: 1px 8px; flex: 0 0 auto; }
+.dl-o.is-on .dl-o-note { color: #a5b4fc; border-color: rgba(99,102,241,.45); background: rgba(99,102,241,.12); }
+.ai-progress .prog-fill { background: linear-gradient(90deg, var(--indigo), var(--cyan)); }

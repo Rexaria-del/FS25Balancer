@@ -56,6 +56,33 @@ def check_ollama() -> Tuple[bool, List[str]]:
     return False, []
 
 
+def installed_models_disk() -> List[str]:
+    """Модели по манифестам на диске: %OLLAMA_MODELS% или ~/.ollama/models.
+
+    Нужен именно обход файлов, потому что /api/tags отвечает пустым, когда служба
+    Ollama остановлена, — и дропдаун «готовые к работе» ложно пустел.
+    """
+    roots = []
+    env = os.environ.get("OLLAMA_MODELS")
+    if env:
+        roots.append(env)
+    roots.append(os.path.join(os.path.expanduser("~"), ".ollama", "models"))
+    out: List[str] = []
+    for root in roots:
+        mf = os.path.join(root, "manifests")
+        if not os.path.isdir(mf):
+            continue
+        for dirpath, _dirs, files in os.walk(mf):
+            rel = os.path.relpath(dirpath, mf).replace("\\", "/")
+            parts = [p for p in rel.split("/") if p]
+            if len(parts) < 2:
+                continue
+            name = "/".join(parts[1:])
+            for tag in files:
+                out.append(f"{name}:{tag}")
+    return sorted(set(out))
+
+
 def _no_window() -> Dict[str, Any]:
     kw: Dict[str, Any] = {}
     if os.name == "nt":
@@ -409,6 +436,8 @@ def ollama_ps() -> List[Dict[str, Any]]:
 
 def model_catalog() -> Dict[str, Any]:
     ok, models = check_ollama()
+    if not models:
+        models = installed_models_disk()
     rec, reason, hw = recommend_model()
     cat = [dict(m, size=f"{m['gb']:.1f} ГБ", rank=MODEL_RANKS.get(m["name"], 0))
            for m in MODEL_CATALOG]
@@ -486,7 +515,25 @@ def install_ollama_silent(status_cb: Callable[[str], None],
     try:
         tmp = os.path.join(tempfile.gettempdir(), "OllamaSetup.exe")
         if not os.path.isfile(tmp) or os.path.getsize(tmp) < 1000000:
-            urllib.request.urlretrieve(url, tmp)
+            req = urllib.request.Request(url, headers={"User-Agent": "FS25Balancer"})
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                total = int(resp.headers.get("Content-Length") or 0)
+                got, last_b, last_t = 0, 0, time.time()
+                with open(tmp + ".part", "wb") as out:
+                    while True:
+                        chunk = resp.read(262144)
+                        if not chunk:
+                            break
+                        out.write(chunk)
+                        got += len(chunk)
+                        now = time.time()
+                        if now - last_t >= 0.4:
+                            sp = (got - last_b) / (now - last_t) / 2 ** 20
+                            status_cb({"msg": f"Загружаю Ollama: {got // 2 ** 20} МБ",
+                                       "pct": round(got / total * 100, 1) if total else None,
+                                       "done": got, "total": total, "speed": f"{sp:.1f} МБ/с"})
+                            last_b, last_t = got, now
+            os.replace(tmp + ".part", tmp)
         subprocess.Popen([tmp, "/VERYSILENT", "/NORESTART", "/SUPPRESSMSGBOXES"], **_no_window())
         for _ in range(240):
             if get_ollama_exe():

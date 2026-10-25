@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>FS25 Автобалансировщик v15</title>
 <meta http-equiv="Cache-Control" content="no-store">
-<link rel="stylesheet" href="css/app.css?v=15.1">
+<link rel="stylesheet" href="css/app.css?v=15.2">
 <script>
 window.__jsErrors = [];
 window.addEventListener("error", function (e) {
@@ -233,20 +233,20 @@ setInterval(function () {
       <div class="card">
         <h3>🤖 Локальный ИИ (Ollama)</h3>
         <label class="switch"><input type="checkbox" id="useAi" checked><span class="track"><i></i></span><em>Использовать ИИ для классификации</em></label>
-        <div class="dl" id="aiModelDl" hidden></div>
-        <div class="dl-cur" id="aiModelCur" title="Клик — выбрать установленную модель"><span id="aiModelCurTxt">—</span><b>▾</b></div>
+        <div class="field">
+          <label>Активная модель — выбор из установленных и готовых к работе</label>
+          <div class="dl-cur" id="aiModelCur" title="Клик — список готовых моделей"><span id="aiModelCurTxt">—</span><b>▾</b></div>
+          <div class="dl" id="aiModelDl" hidden></div>
+        </div>
+        <div class="btnrow">
+          <button class="btn btn-good sm" id="btnAiStart">▶ Запустить Ollama</button>
+          <button class="btn btn-bad sm" id="btnAiStop">⏹ Остановить службу</button>
+          <button class="btn btn-ghost sm" id="btnAiRefresh">⟳ Обновить список</button>
+        </div>
         <div class="ai-progress" id="aiProgress" hidden>
           <div class="prog-meta"><span id="aiProgMsg"></span><span id="aiProgPct"></span></div>
-          <div class="prog-track"><i id="aiProgBar"></i></div>
+          <div class="prog-track"><i class="prog-fill" id="aiProgBar"></i></div>
           <div class="prog-meta"><span id="aiProgSpeed"></span><span id="aiProgSize"></span></div>
-        </div>
-        <div class="field2">
-          <div class="field"><label>Модель</label><input type="text" id="aiModel" value="phi3"></div>
-          <div class="btnrow">
-            <button class="btn btn-good sm" id="btnAiStart">▶ Запустить</button>
-            <button class="btn btn-bad sm" id="btnAiStop">⏹ Остановить</button>
-            <button class="btn btn-accent sm" id="btnAiDl">⬇ Скачать модель</button>
-          </div>
         </div>
         <div class="ai-list" id="aiList"></div>
         <div class="btnrow"><button class="btn btn-bad sm" id="btnClearMem">🗑 Очистить всю память</button></div>
@@ -275,6 +275,6 @@ setInterval(function () {
 <div class="toast-wrap" id="toasts"></div>
 <div class="logbar"><span class="dot"></span><span id="logText" class="dim">готов</span></div>
 
-<script src="js/app.js?v=15.1"></script>
+<script src="js/app.js?v=15.2"></script>
 </body>
 </html>
