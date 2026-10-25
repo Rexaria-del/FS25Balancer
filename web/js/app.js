@@ -107,7 +107,7 @@ function startIntro() {
   const el = $("#intro");
   if (!el) return finishIntro();
   $("#inTitle").innerHTML = "FS25 BALANCER".split("").map((ch, i) =>
-    `<span style="animation-delay:${(1.55 + i * 0.05).toFixed(2)}s">${ch === " " ? "&nbsp;" : esc(ch)}</span>`).join("");
+    `<span style="animation-delay:${(2.35 + i * 0.075).toFixed(2)}s">${ch === " " ? "&nbsp;" : esc(ch)}</span>`).join("");
   introFx();
   const par = $("#inPar");
   el.addEventListener("mousemove", e => {
@@ -115,7 +115,7 @@ function startIntro() {
     const dx = (e.clientX - r.width / 2) / r.width, dy = (e.clientY - r.height / 2) / r.height;
     if (par) par.style.transform = `translate3d(${(dx * 16).toFixed(1)}px, ${(dy * 10).toFixed(1)}px, 0) rotateY(${(dx * 5).toFixed(2)}deg) rotateX(${(-dy * 3.5).toFixed(2)}deg)`;
   });
-  setTimeout(finishIntro, 5300);
+  setTimeout(finishIntro, 7800);
   const skip = () => { finishIntro(); document.removeEventListener("click", skip); document.removeEventListener("keydown", skip); };
   document.addEventListener("click", skip);
   document.addEventListener("keydown", skip);
@@ -1047,7 +1047,9 @@ document.addEventListener("wheel", e => {
     el = el.parentElement;
   }
   const v = $(".view.is-on");
-  if (canScroll(v, e.deltaY)) { v.scrollTop += e.deltaY; e.preventDefault(); }
+  if (canScroll(v, e.deltaY)) { v.scrollTop += e.deltaY; e.preventDefault(); return; }
+  const se = document.scrollingElement || document.documentElement;
+  if (se && se.scrollHeight > se.clientHeight + 4) { se.scrollTop += e.deltaY; e.preventDefault(); }
 }, { passive: false });
 
 /* ── heist-эффект кнопок ── */
