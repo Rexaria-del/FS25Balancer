@@ -158,6 +158,15 @@ class BalancerService:
                     c.scan_target = ScanTarget[v.upper()]
                 except KeyError:
                     pass
+            elif k in ("shop_x", "shop_z"):
+                try:
+                    cur = [float(x) for x in c.shop_coordinates.get("shop", (0.0, 0.0))]
+                    while len(cur) < 2:
+                        cur.append(0.0)
+                    cur[0 if k == "shop_x" else 1] = float(v)
+                    c.shop_coordinates["shop"] = (cur[0], cur[1])
+                except (TypeError, ValueError):
+                    pass
             elif k == "country_multipliers" and isinstance(v, dict):
                 out = {}
                 for cn, mv in v.items():

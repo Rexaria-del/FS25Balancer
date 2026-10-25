@@ -249,16 +249,20 @@ def detect_country_and_retro(brand: str, title: str, filename: str, mod_name: st
             is_retro = check_retro_keywords(combined)
             return country, info["flag"], cfg.multiplier_for(country), is_retro, False, f"Бренд ({country})"
 
+    kw_retro = check_retro_keywords(combined)
     if cfg.use_local_ai:
         country, is_retro, reason = ask_ai_classification(
             brand, title, filename, mod_name, cfg, allowed)
         if country and country in allowed:
             info = country_info(country)
-            return country, info["flag"], cfg.multiplier_for(country), is_retro, False, reason
-        return "⚠️ Проверить", "❓", cfg.multiplier_for(allowed[0]), False, True, f"ИИ: {reason}"
+            return (country, info["flag"], cfg.multiplier_for(country),
+                    bool(is_retro or kw_retro), False, reason)
+        return ("⚠️ Проверить", "❓", cfg.multiplier_for(allowed[0]),
+                kw_retro, True, f"ИИ: {reason}")
 
     info = country_info(allowed[0])
-    return allowed[0], info["flag"], cfg.multiplier_for(allowed[0]), False, True, "По умолчанию"
+    return (allowed[0], info["flag"], cfg.multiplier_for(allowed[0]),
+            kw_retro, True, "По умолчанию")
 
 
 RETRO_KEYWORDS = [
@@ -275,3 +279,40 @@ RETRO_KEYWORDS = [
 def check_retro_keywords(text: str) -> bool:
     t = (text or "").lower()
     return any(kw in t for kw in RETRO_KEYWORDS)
+
+
+MODEL_CATALOG = [
+    {"name": "phi3:latest", "size": "3.8 ГБ", "desc": "рекомендуемая: баланс качества и скорости"},
+    {"name": "llama3.2:3b", "size": "2.0 ГБ", "desc": "быстрая и лёгкая, для слабых ПК"},
+    {"name": "qwen2.5:3b", "size": "1.9 ГБ", "desc": "уверенно понимает русские формулировки"},
+    {"name": "gemma2:2b", "size": "1.6 ГБ", "desc": "компактная, для быстрого старта"},
+    {"name": "tinyllama:1.1b", "size": "0.6 ГБ", "desc": "сверхлёгкий минимум точности"},
+]
+
+
+def model_catalog() -> Dict[str, Any]:
+    ok, models = check_ollama()
+    return {"running": ok, "installed": models, "catalog": MODEL_CATALOG,
+            "ollama_installed": bool(get_ollama_exe())}
+
+
+def install_ollama_silent(status_cb: Callable[[str], None],
+                          done_cb: Callable[[str], None]) -> bool:
+    """Тихая установка Ollama (Inno Setup /VERYSILENT) после согласия пользователя."""
+    url = "https://ollama.com/download/OllamaSetup.exe"
+    status_cb("Скачиваю установщик Ollama (~1 ГБ)…")
+    try:
+        tmp = os.path.join(tempfile.gettempdir(), "OllamaSetup.exe")
+        if not os.path.isfile(tmp) or os.path.getsize(tmp) < 1000000:
+            urllib.request.urlretrieve(url, tmp)
+        subprocess.Popen([tmp, "/VERYSILENT", "/NORESTART", "/SUPPRESSMSGBOXES"], **_no_window())
+        for _ in range(240):
+            if get_ollama_exe():
+                done_cb("Ollama установлена.")
+                return True
+            time.sleep(1.0)
+        done_cb("Установщик Ollama ещё работает — подождите завершения.")
+        return False
+    except Exception as e:
+        done_cb(f"Ошибка скачивания Ollama: {e}")
+        return False

@@ -462,6 +462,7 @@ def process_mod(mod_path: str, cfg: BalancerConfig, apply: bool = False,
         except Exception:
             return results
 
+        backed = False
         for sf in sfiles:
             if stop and stop.is_set():
                 break
@@ -474,6 +475,13 @@ def process_mod(mod_path: str, cfg: BalancerConfig, apply: bool = False,
                                         overrides, write=apply)
                 if spec:
                     if apply:
+                        # бэкап папки-мода перед первой записью (zip-ветка делает это ниже)
+                        if not backed and cfg.create_backups and backup_dir:
+                            bp = os.path.join(backup_dir, mod_name)
+                            os.makedirs(backup_dir, exist_ok=True)
+                            if not os.path.exists(bp):
+                                shutil.copytree(mod_path, bp, dirs_exist_ok=True)
+                            backed = True
                         tree.write(fp, encoding="utf-8", xml_declaration=True)
                     results.append(spec)
             except Exception:

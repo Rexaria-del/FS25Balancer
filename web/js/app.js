@@ -78,12 +78,28 @@ function showView(key) {
   if (key === "fields") drawCurve();
   if (S.tourStep >= 0) placeTour();
 }
+$$(".nav-i").forEach(b => b.onclick = () => showView(b.dataset.view));
 
 /* ── загрузка ── */
 async function boot() {
+  try {
+    await bootInner();
+  } catch (e) {
+    console.error("boot error", e);
+    call("log", "js boot ERR " + String((e && e.message) || e));
+    const h = document.querySelector(".boot-hint");
+    if (h) h.textContent = "boot error: " + String((e && e.message) || e);
+    setTimeout(boot, 1000);
+    return;
+  }
+}
+
+async function bootInner() {
+  call("log", "js bootInner start");
   const b = await call("boot");
   if (!b) { setTimeout(boot, 300); return; }
   S.boot = b;
+  call("log", "js boot ok");
   $("#verTag").textContent = "v" + b.version;
   $("#dataPath").textContent = b.data_dir;
   $("#modsDir").value = b.config.mods_dir || b.default_mods_dir || "";
@@ -103,12 +119,13 @@ async function boot() {
     $("#shell").hidden = false;
     setTimeout(() => { $("#boot").remove(); }, 600);
     startPoll();
+    call("log", "js shell visible");
     maybeTour();
   }, 450);
 }
 
 function fillScanTargets(list, current) {
-  $("#scanTarget").innerHTML = list.map(t =>
+  $("#scanTarget").innerHTML = (list || []).map(t =>
     `<option value="${t.key}"${t.key === current ? " selected" : ""}>${esc(t.label)}</option>`).join("");
 }
 
@@ -217,6 +234,17 @@ function handleEvent(ev) {
       log(d.aborted ? "Применение прервано" : `Записано в моды: ${d.count} позиций`, d.aborted ? "warn" : "ok");
       toast(d.aborted ? "warn" : "ok", d.aborted ? "Применение прервано" : `💾 Готово: изменено ${d.count} файлов позиций`);
       break;
+    case "ai_status":
+      checkAi();
+      break;
+    case "ai_progress":
+      log(d.msg || "", "busy");
+      break;
+    case "ai_done":
+      setBusy(false);
+      toast("info", d.msg || "Готово", 6000);
+      checkAi();
+      break;
     case "log":
       log(d.message, "busy");
       break;
@@ -237,19 +265,49 @@ function setBusy(on, text) {
 }
 
 async function checkAi() {
-  const st = await call("ai_status");
+  const st = await call("ai_catalog");
+  if (!st) return;
+  S.ai = st;
   const pill = $("#aiPill");
-  if (!st) { pill.innerHTML = `<i></i><span>ИИ: недоступен</span>`; return; }
-  pill.className = "ai-pill " + (st.ok ? "is-on" : "is-off");
-  pill.innerHTML = `<i></i><span>${st.ok ? "Ollama активна · " + st.models.length + " мод." : "Ollama выключена"}</span>`;
-  $("#aiList").innerHTML = (st.models || []).map(m =>
-    `<div class="ai-i"><span>${esc(m)}</span><button class="mini" data-model="${esc(m)}">выбрать</button></div>`).join("")
-    || `<div class="dim sm">Модели не установлены. Скачай, например, <code>phi3</code>.</div>`;
-  $$("#aiList [data-model]").forEach(b => b.onclick = () => {
-    $("#aiModel").value = b.dataset.model;
-    call("set_config", { ai_model_name: b.dataset.model });
-    toast("info", "Модель выбрана: " + b.dataset.model);
+  pill.className = "ai-pill " + (st.running ? "is-on" : "is-off");
+  pill.innerHTML = `<i></i><span>${st.running ? "Ollama активна" : (st.ollama_installed ? "Ollama: служба выключена" : "Ollama не установлена")}</span>`;
+  renderAiCatalog();
+}
+
+function renderAiCatalog() {
+  const st = S.ai || { catalog: [], installed: [], running: false, current: "", ollama_installed: false };
+  const inst = st.installed || [];
+  const has = n => inst.some(x => x === n || x.indexOf(n.split(":")[0] + ":") === 0);
+  $("#aiList").innerHTML = (st.catalog || []).map(m => `
+    <div class="ai-i"><span><b>${esc(m.name)}</b> <span class="dim">· ${esc(m.size)} · ${esc(m.desc)}</span></span>
+      <span style="display:flex;gap:6px;flex:0 0 auto">
+        ${has(m.name) ? `<button class="mini" data-use="${esc(m.name)}">${st.current === m.name ? "✓ выбрана" : "выбрать"}</button>` : ""}
+        <button class="mini" data-setup="${esc(m.name)}">${has(m.name) ? "⟳ переустановить" : "⬇ установить и использовать"}</button>
+      </span></div>`).join("")
+    + `<div class="dim sm" style="margin-top:10px">Или любой тег из библиотеки Ollama:</div>
+      <div style="display:flex;gap:8px"><input type="text" id="aiModelCustom" placeholder="например mistral:7b" value="${esc(st.current || "")}">
+      <button class="mini" id="btnCustomSetup">настроить</button></div>`;
+  $$("#aiList [data-use]").forEach(b => b.onclick = async () => {
+    const r = await call("set_config", { ai_model_name: b.dataset.use, use_local_ai: true });
+    if (r && r.ok) { toast("ok", "Модель выбрана: " + b.dataset.use); checkAi(); }
   });
+  $$("#aiList [data-setup]").forEach(b => b.onclick = () => aiOneClick(b.dataset.setup));
+  const bc = $("#btnCustomSetup");
+  if (bc) bc.onclick = () => { const v = $("#aiModelCustom").value.trim(); if (v) aiOneClick(v); else toast("warn", "Введите тег модели"); };
+}
+
+async function aiOneClick(model) {
+  const st = S.ai || {};
+  if (!st.ollama_installed) {
+    if (!confirm("Ollama не найдена на этом ПК.\nСкачать и установить её тихо (~1 ГБ), затем загрузить модель " + model + "?\nУстановка идёт в фоне, прогресс — в журнале внизу.")) return;
+    const r = await call("ai_install_setup", model);
+    if (!r || !r.ok) return toast("err", (r && r.error) || "Не удалось начать установку");
+    toast("info", "Устанавливаю Ollama и модель в фоне — следите за журналом");
+    return;
+  }
+  const r = await call("ai_setup", model);
+  if (!r || !r.ok) return toast("err", (r && r.error) || "Ошибка настройки");
+  toast("info", "Модель " + model + ": загрузка/запуск в фоне");
 }
 
 /* ── таблица ── */
@@ -914,8 +972,11 @@ function placeTour() {
   const t = $("#tour"), hole = ensureHole();
   if (S.tourStep < 0 || S.tourStep >= TOUR.length) return endTour();
   const step = TOUR[S.tourStep];
-  if (step.sel.startsWith('[data-view') || step.sel === ".thead .c-new" ||
-      step.sel === ".thead .c-country" || step.sel === ".thead .c-retro") showView("scan");
+  // showView("scan") сам дёргает placeTour() — переключаем вьюху только если
+  // она реально отличается, иначе взаимная рекурсия showView<->placeTour.
+  if (step.sel.startsWith(".thead") && !$("#view-scan").classList.contains("is-on")) {
+    showView("scan");
+  }
   const el = $(step.sel);
   if (!el) { S.tourStep++; return placeTour(); }
   $("#tourTitle").textContent = step.title;
@@ -958,6 +1019,7 @@ const CHANGELOG = [
     "Поля: цена зависит от расстояния до магазина, радиус и сила влияния, график",
     "Ручной ввод площади/дистанции поля; неопознанные значения помечаются «Проверить»",
     "Интерактивное обучение для новых пользователей и журнал версий",
+    "ИИ в один клик: каталог моделей, тихая установка Ollama с согласия пользователя",
   ]},
   { v: "14.0", date: "2026-10-18", title: "World Edition (Tkinter)", items: [
     "Страны мира вместо трёх регионов, флаги и коэффициенты",
@@ -1007,11 +1069,20 @@ function injectFooterButtons() {
 
 /* ── старт ── */
 window.addEventListener("DOMContentLoaded", () => {
-  bindSettings();
-  injectFooterButtons();
+  try { bindSettings(); } catch (e) { console.error("bindSettings", e); }
+  try { injectFooterButtons(); } catch (e) { console.error("footer", e); }
   boot();
   document.addEventListener("keydown", e => {
     if (e.key === "Escape") { closePop(); closeMenu(); closeTtx(); if ($("#clModal")) $("#clModal").hidden = true; }
     if (e.key === "F5") { e.preventDefault(); renderTable(); }
   });
 });
+
+/* ── watchdog: диагностика, если boot не пришёл ── */
+setTimeout(() => {
+  if (!S.boot) {
+    const h = document.querySelector(".boot-hint");
+    if (h) h.textContent = "boot не получен | pywebview=" + typeof window.pywebview +
+      " | api=" + String(!!(window.pywebview && window.pywebview.api));
+  }
+}, 12000);
