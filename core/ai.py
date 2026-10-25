@@ -97,26 +97,39 @@ def stop_ollama(cb: Callable[[str], None]) -> None:
         pass
 
 
-def download_model(name: str, prog_cb: Callable[[str], None],
+def download_model(name: str, prog_cb: Callable[[Any], None],
                    done_cb: Callable[[str], None]) -> None:
-    exe = get_ollama_exe()
-    if not exe:
-        done_cb("Сначала установите Ollama!")
-        return
-    if not start_ollama(prog_cb):
+    """Pull через /api/pull (stream): проценты, скорость, прогресс по слоям."""
+    if not start_ollama(lambda m: prog_cb({"msg": str(m)})):
         done_cb("Не удалось запустить Ollama.")
         return
     try:
-        kw = dict(stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-                  encoding="utf-8", errors="ignore")
-        kw.update(_no_window())
-        proc = subprocess.Popen([exe, "pull", name], **kw)
-        for line in proc.stdout or []:
-            s = line.strip()
-            if s:
-                prog_cb(f"⬇ [{name}]: {s}")
-        rc = proc.wait()
-        done_cb(f"✅ Модель '{name}' загружена!" if rc == 0 else f"Ошибка: код {rc}")
+        payload = json.dumps({"name": name, "stream": True}).encode("utf-8")
+        req = urllib.request.Request(f"{OLLAMA_HOST}/api/pull", data=payload,
+                                     headers={"Content-Type": "application/json"})
+        last_bytes, last_t = 0.0, time.time()
+        with urllib.request.urlopen(req, timeout=None) as resp:
+            for raw in resp:
+                try:
+                    j = json.loads(raw.decode("utf-8", "ignore"))
+                except ValueError:
+                    continue
+                status = str(j.get("status", ""))
+                comp, tot = j.get("completed"), j.get("total")
+                info: Dict[str, Any] = {"msg": f"[{name}] {status}"}
+                if comp is not None and tot:
+                    if comp < last_bytes:
+                        last_bytes, last_t = 0.0, time.time()   # новый слой
+                    now = time.time()
+                    dt = max(now - last_t, 0.05)
+                    mbps = max(0.0, comp - last_bytes) / dt / 2 ** 20
+                    last_bytes, last_t = comp, now
+                    info.update(pct=round(min(100.0, comp / tot * 100), 1),
+                                done=comp, total=tot,
+                                speed=(f"{mbps:.1f} МБ/с" if mbps < 1000
+                                       else f"{mbps / 1024:.2f} ГБ/с"))
+                prog_cb(info)
+        done_cb(f"✅ Модель '{name}' загружена!")
     except Exception as e:
         done_cb(f"Ошибка: {e}")
 
@@ -380,6 +393,20 @@ def recommend_model(hw: Optional[Dict[str, Any]] = None) -> Tuple[str, str, Dict
     return best["name"], reason, hw
 
 
+def ollama_ps() -> List[Dict[str, Any]]:
+    """Модели, фактически загруженные в память: size vs size_vram => GPU/CPU."""
+    try:
+        req = urllib.request.Request(f"{OLLAMA_HOST}/api/ps")
+        with urllib.request.urlopen(req, timeout=1.5) as r:
+            data = json.loads(r.read().decode("utf-8"))
+        return [{"name": m.get("name", ""), "size": float(m.get("size", 0) or 0),
+                 "vram": float(m.get("size_vram", 0) or 0),
+                 "expires": str(m.get("expires_at", "") or "")}
+                for m in data.get("models", [])]
+    except Exception:
+        return []
+
+
 def model_catalog() -> Dict[str, Any]:
     ok, models = check_ollama()
     rec, reason, hw = recommend_model()
@@ -387,7 +414,7 @@ def model_catalog() -> Dict[str, Any]:
            for m in MODEL_CATALOG]
     return {"running": ok, "installed": models, "catalog": cat,
             "ollama_installed": bool(get_ollama_exe()),
-            "rec": rec, "rec_reason": reason, "hw": hw}
+            "rec": rec, "rec_reason": reason, "hw": hw, "loaded": ollama_ps()}
 
 
 def _find_ollama_uninstall() -> Optional[Tuple[str, List[str]]]:

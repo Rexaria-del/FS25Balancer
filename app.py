@@ -32,6 +32,7 @@ CHANGELOG = [
         "Фиксы: галочка тура, достижимая прокрутка",
         "Один скролл на вкладке, яркая пульсация рекомендации",
         "Заставка уровня кинотитров: частицы, неоновый пол, орбита, глитч, вспышка",
+        "Мягкий звук заставки (WebAudio-синтез), прогресс pull с % и скоростью, статус VRAM моделей",
         "История обновлений в приложении",
     ]},
     {"v": "14.0", "date": "2026-10-20", "items": [
@@ -202,7 +203,7 @@ class Api:
         from core.service import emit
 
         def prog(m):
-            emit("ai_progress", {"msg": str(m)})
+            emit("ai_progress", m if isinstance(m, dict) else {"msg": str(m)})
 
         try:
             if need_install:
@@ -279,7 +280,7 @@ class Api:
             from core.ai import download_model
             from core.service import emit
             download_model(str(model),
-                           lambda m: emit("ai_progress", {"msg": m}),
+                           lambda m: emit("ai_progress", m if isinstance(m, dict) else {"msg": str(m)}),
                            lambda m: emit("ai_done", {"msg": m}))
         threading.Thread(target=w, daemon=True).start()
         return {"ok": True}
@@ -367,7 +368,8 @@ def _setup_pywebview_log():
 
 def main():
     # WebView2 иначе кэширует app.js/app.css между запусками — фиксы не долетают до пользователя
-    os.environ.setdefault("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", "--disable-http-cache")
+    os.environ.setdefault("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
+                          "--disable-http-cache --autoplay-policy=no-user-gesture-required")
     logf = _setup_crashlog()
     _setup_pywebview_log()
     print("[boot] crashlog:", logf.name, flush=True)

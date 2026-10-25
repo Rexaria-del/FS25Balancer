@@ -233,6 +233,13 @@ setInterval(function () {
       <div class="card">
         <h3>🤖 Локальный ИИ (Ollama)</h3>
         <label class="switch"><input type="checkbox" id="useAi" checked><span class="track"><i></i></span><em>Использовать ИИ для классификации</em></label>
+        <div class="dl" id="aiModelDl" hidden></div>
+        <div class="dl-cur" id="aiModelCur" title="Клик — выбрать установленную модель"><span id="aiModelCurTxt">—</span><b>▾</b></div>
+        <div class="ai-progress" id="aiProgress" hidden>
+          <div class="prog-meta"><span id="aiProgMsg"></span><span id="aiProgPct"></span></div>
+          <div class="prog-track"><i id="aiProgBar"></i></div>
+          <div class="prog-meta"><span id="aiProgSpeed"></span><span id="aiProgSize"></span></div>
+        </div>
         <div class="field2">
           <div class="field"><label>Модель</label><input type="text" id="aiModel" value="phi3"></div>
           <div class="btnrow">

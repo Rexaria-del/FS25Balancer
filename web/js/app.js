@@ -103,9 +103,49 @@ function finishIntro() {
 
 function introWait() { return S.introDone ? Promise.resolve() : _introP; }
 
+function introSound() {
+  try {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    const ac = new AC();
+    const t0 = ac.currentTime;
+    const master = ac.createGain(); master.gain.value = 0.11;
+    const lp = ac.createBiquadFilter(); lp.type = "lowpass";
+    lp.frequency.setValueAtTime(180, t0);
+    lp.frequency.linearRampToValueAtTime(2600, t0 + 3.4);
+    lp.frequency.linearRampToValueAtTime(700, t0 + 7.2);
+    lp.Q.value = 0.8;
+    lp.connect(master); master.connect(ac.destination);
+    [55, 82.41, 110, 164.81, 220, 329.63].forEach((f, i) => {
+      const o = ac.createOscillator(); o.type = i < 2 ? "sine" : "triangle";
+      o.frequency.value = f; o.detune.value = (i % 2 ? 4 : -4);
+      const g = ac.createGain(); g.gain.value = 0.0;
+      g.gain.linearRampToValueAtTime(i < 2 ? 1 : 0.4, t0 + 2.6 + i * 0.18);
+      g.gain.linearRampToValueAtTime(0.0001, t0 + 7.5);
+      o.connect(g); g.connect(lp); o.start(t0); o.stop(t0 + 7.6);
+    });
+    const bump = ac.createOscillator(); bump.type = "sine";
+    bump.frequency.setValueAtTime(70, t0 + 0.4);
+    bump.frequency.exponentialRampToValueAtTime(38, t0 + 1.3);
+    const bg = ac.createGain();
+    bg.gain.setValueAtTime(0.0001, t0 + 0.35);
+    bg.gain.linearRampToValueAtTime(1, t0 + 0.5);
+    bg.gain.exponentialRampToValueAtTime(0.0001, t0 + 1.6);
+    bump.connect(bg); bg.connect(master); bump.start(t0 + 0.35); bump.stop(t0 + 1.7);
+    const len = ac.sampleRate * 7.4;
+    const nb = ac.createBuffer(1, len, ac.sampleRate);
+    for (let i = 0; i < len; i++) nb.getChannelData(0)[i] = (Math.random() * 2 - 1) * Math.pow(i / len, 2.2);
+    const ns = ac.createBufferSource(); ns.buffer = nb;
+    const nf = ac.createBiquadFilter(); nf.type = "bandpass"; nf.frequency.value = 900; nf.Q.value = 0.9;
+    const ng = ac.createGain(); ng.gain.value = 0.16;
+    ns.connect(nf); nf.connect(ng); ng.connect(master); ns.start(t0);
+  } catch (e) { /* звук — украшение, не критично */ }
+}
+
 function startIntro() {
   const el = $("#intro");
   if (!el) return finishIntro();
+  introSound();
   $("#inTitle").innerHTML = "FS25 BALANCER".split("").map((ch, i) =>
     `<span style="animation-delay:${(2.35 + i * 0.075).toFixed(2)}s">${ch === " " ? "&nbsp;" : esc(ch)}</span>`).join("");
   introFx();
@@ -194,6 +234,7 @@ async function bootInner() {
     $("#shell").hidden = false;
     setTimeout(() => { $("#boot").remove(); }, 600);
     startPoll();
+    setInterval(() => { if (!document.hidden) refreshStatuses(); }, 6000);
     call("log", "js shell visible");
     maybeTour();
   }, 450);
@@ -316,9 +357,19 @@ function handleEvent(ev) {
       break;
     case "ai_progress":
       log(d.msg || "", "busy");
+      if (d.pct != null) {
+        const box = $("#aiProgress"); if (!box) break;
+        box.hidden = false;
+        $("#aiProgBar").style.width = d.pct + "%";
+        $("#aiProgPct").textContent = d.pct + "%";
+        $("#aiProgSpeed").textContent = d.speed || "";
+        $("#aiProgSize").textContent = d.total ? fmtBytes(d.done) + " / " + fmtBytes(d.total) : "";
+        $("#aiProgMsg").textContent = d.msg || "";
+      }
       break;
     case "ai_done":
       setBusy(false);
+      const pb = $("#aiProgress"); if (pb) pb.hidden = true;
       toast("info", d.msg || "Готово", 6000);
       checkAi();
       break;
@@ -381,15 +432,28 @@ function renderAiCatalog() {
       (recM ? `<div class="ai-sec">★ Рекомендованная модель</div>${row(recM, true)}
                <div class="ai-sec">Остальные модели (${rest.length})</div>` : "") +
       rest.map(m => row(m, false)).join("") +
-      (inst.length ? `<div class="hr"></div><div class="dim sm">Установленные модели (${inst.length}) — можно удалить из программы:</div>` +
-        inst.map(n => `
-        <div class="ai-i"><span>${esc(n)}${n === st.current ? ' <span class="dim"> · текущая</span>' : ""}</span>
-          <button class="mini danger" data-del="${esc(n)}">🗑 удалить</button></div>`).join("") : "") +
+      (inst.length ? `<div class="hr"></div><div class="dim sm">Установленные и готовые к работе модели (${inst.length}):</div>` +
+        inst.map(n => {
+          const ld = (st.loaded || []).find(x => x.name === n || x.name.split(":")[0] === n.split(":")[0]);
+          const gpu = ld && ld.size > 0 && ld.vram / ld.size >= 0.5;
+          return `
+        <div class="ai-i"><span>${esc(n)}${n === st.current ? ' <span class="dim"> · текущая</span>' : ""}
+          ${ld ? `<span class="vram-badge ${gpu ? "is-gpu" : "is-cpu"}" title="${gpu ? "Модель в видеопамяти — быстрый отклик" : "Модель в ОЗУ — медленнее, GPU не задействован"}">${gpu ? "⚡ GPU" : "≡ CPU"}${gpu ? " · " + fmtBytes(ld.vram) : ""}</span>` : '<span class="vram-badge is-idle">в покое</span>'}</span>
+          <span style="display:flex;gap:6px;flex:0 0 auto">
+            <button class="mini" data-use="${esc(n)}">${st.current === n ? "✓ выбрана" : "использовать"}</button>
+            <button class="mini danger" data-del="${esc(n)}">🗑 удалить</button>
+          </span></div>`; }).join("") : "") +
+      `<div class="hr"></div>
+      <div class="dim sm">Быстрый выбор установленной модели:</div>
+      <div class="dl-cur" id="aiQuickCur"><span>${esc(st.current || "не выбрана")}</span><b>▾</b></div>` +
+      bindQuickDl(inst) +
       `<div class="hr"></div>
       <div class="dim sm">Или любой тег из библиотеки Ollama:</div>
       <div style="display:flex;gap:8px"><input type="text" id="aiModelCustom" placeholder="например mistral:latest" value="${esc(st.current || "")}">
       <button class="mini" id="btnCustomSetup">настроить</button></div>
       <div class="btnrow"><button class="mini danger" id="btnAiUninstall">🗑 Удалить Ollama из системы</button></div>`;
+  const qc = $("#aiQuickCur");
+  if (qc) qc.onclick = e => { e.stopPropagation(); const dl = $("#aiModelDl"); if (dl) dl.hidden = !dl.hidden; };
   $$("#aiList [data-sort]").forEach(b => b.onclick = () => { S.aiSort = b.dataset.sort; renderAiCatalog(); });
   $$("#aiList [data-use]").forEach(b => b.onclick = async () => {
     const r = await call("set_config", { ai_model_name: b.dataset.use, use_local_ai: true });
@@ -409,6 +473,27 @@ function renderAiCatalog() {
     const r = await call("ai_uninstall");
     if (r && r.ok) toast("info", "Запускаю деинсталляцию Ollama…");
   };
+}
+
+function bindQuickDl(inst) {
+  const dl = $("#aiModelDl");
+  if (!dl) return "";
+  if (!inst.length) { dl.hidden = true; return '<div class="dim sm" style="margin-top:6px">Пока ничего не установлено — нажми «⬇ установить и использовать» у модели ниже.</div>'; }
+  dl.innerHTML = inst.map(n => `<div class="dl-o" data-q="${esc(n)}">${esc(n)}</div>`).join("");
+  $$("#aiModelDl .dl-o").forEach(o => o.onclick = async () => {
+    dl.hidden = true;
+    const r = await call("set_config", { ai_model_name: o.dataset.q, use_local_ai: true });
+    if (r && r.ok) { toast("ok", "Модель выбрана: " + o.dataset.q); $("#aiModel").value = o.dataset.q; checkAi(); }
+  });
+  return "";
+}
+
+async function refreshStatuses() {
+  if (!S.ai) return;
+  const st = await call("ai_catalog");
+  if (!st) return;
+  S.ai = Object.assign(S.ai, st);
+  if ($("#view-pro").classList.contains("is-on")) renderAiCatalog();
 }
 
 async function aiOneClick(model) {
@@ -488,6 +573,10 @@ function rowEl(it) {
   return tr;
 }
 const fmt1 = v => Number(v || 0).toFixed(1).replace(/\.0$/, "");
+function fmtBytes(n) { n = Number(n) || 0;
+  if (n >= 2 ** 30) return (n / 2 ** 30).toFixed(2) + " ГБ";
+  if (n >= 2 ** 20) return (n / 2 ** 20).toFixed(1) + " МБ";
+  return Math.round(n / 1024) + " КБ"; }
 const fmt2 = v => Number(v || 0).toFixed(2);
 
 /* делегирование кликов таблицы */
@@ -569,6 +658,7 @@ function positionPop(pop, anchor) {
 }
 function closePop() { $("#pop").hidden = true; popKey = null; }
 document.addEventListener("click", e => {
+  if (!e.target.closest("#aiModelDl") && !e.target.closest(".dl-cur")) { const dl = $("#aiModelDl"); if (dl) dl.hidden = true; }
   if (!popKey) return;
   if (e.target.closest("#pop") || e.target.closest("[data-country]")) return;
   closePop();
@@ -1187,6 +1277,8 @@ const CHANGELOG = [
     "Фиксы: галочка тура врезана в карточку, достижимая прокрутка до низа",
     "Один общий скролл на вкладке, заметная переливающаяся пульсация рекомендации",
     "Заставка уровня кинотитров: космо-частицы, неоновый пол, орбита, глитч букв, вспышка-кат",
+    "Звук заставки: мягкий кинематографичный эмбиент (синтез, без файлов)",
+    "Прогресс скачивания моделей: %, скорость МБ/с, размер; дропдаун только установленных; статус GPU/CPU/VRAM по каждой модели",
   ]},
   { v: "14.0", date: "2026-10-18", title: "World Edition (Tkinter)", items: [
     "Страны мира вместо трёх регионов, флаги и коэффициенты",

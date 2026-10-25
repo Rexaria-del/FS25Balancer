@@ -670,3 +670,29 @@ input[type=range]:active::-webkit-slider-thumb { transform: scale(1.05); }
   55% { transform: translateX(2px); text-shadow: -2px 0 rgba(255,80,120,.55), 2px 0 rgba(80,200,255,.55); }
   75% { transform: none; } }
 @keyframes faceGlow { 0%, 100% { border-color: rgba(151,166,255,.85); } 50% { border-color: rgba(190,220,255,1); } }
+
+
+/* ── v15.1f: дропдаун моделей, прогресс pull, VRAM-статус ── */
+.dl-cur { position: relative; display: inline-flex; align-items: center; gap: 8px; margin: 8px 0 4px;
+  padding: 9px 13px; border: 1px solid var(--line); border-radius: var(--r-sm); background: var(--input);
+  cursor: pointer; font-size: 13px; transition: border-color .2s, box-shadow .2s; }
+.dl-cur:hover { border-color: var(--indigo); box-shadow: 0 0 0 3px rgba(99,102,241,.18); }
+.dl-cur b { color: var(--dim); font-weight: 400; }
+.dl { position: relative; margin: 4px 0 8px; border: 1px solid var(--line); border-radius: var(--r-sm);
+  background: var(--input); max-height: 190px; overflow: auto; z-index: 6;
+  box-shadow: var(--sh-2); animation: dlIn .22s var(--ease) both; }
+@keyframes dlIn { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: none; } }
+.dl[hidden] { display: none; }
+.dl-o { padding: 8px 12px; font-size: 12.5px; cursor: pointer; transition: background .15s; }
+.dl-o:hover { background: rgba(99,102,241,.16); }
+.ai-progress { margin: 10px 0; padding: 10px 12px; border: 1px solid rgba(99,102,241,.4);
+  border-radius: var(--r-sm); background: rgba(99,102,241,.07); animation: dlIn .25s var(--ease) both; }
+.ai-progress[hidden] { display: none; }
+.ai-progress .prog-track { height: 6px; }
+.ai-progress #aiProgBar { display: block; height: 100%; width: 0%; border-radius: 6px;
+  background: linear-gradient(90deg, var(--indigo), var(--cyan)); transition: width .45s var(--ease); }
+.vram-badge { font-size: 10px; padding: 2px 8px; border-radius: 999px; margin-left: 8px;
+  border: 1px solid var(--line); color: var(--muted); vertical-align: 1px; }
+.vram-badge.is-gpu { color: #6ee7b7; border-color: rgba(52,211,153,.5); background: rgba(52,211,153,.12); }
+.vram-badge.is-cpu { color: #fcd34d; border-color: rgba(251,191,36,.5); background: rgba(251,191,36,.1); }
+.vram-badge.is-idle { color: var(--dim); }
