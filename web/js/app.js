@@ -105,11 +105,11 @@ function startIntro() {
   const el = $("#intro");
   if (!el) return finishIntro();
   $("#inTitle").innerHTML = "FS25 BALANCER".split("").map((ch, i) =>
-    `<span style="animation-delay:${(0.95 + i * 0.052).toFixed(2)}s">${ch === " " ? "&nbsp;" : esc(ch)}</span>`).join("");
+    `<span style="animation-delay:${(1.15 + i * 0.055).toFixed(2)}s">${ch === " " ? "&nbsp;" : esc(ch)}</span>`).join("");
   let g = "";
   for (let i = 0; i < 90; i++) g += `<i style="left:${(Math.random() * 100).toFixed(1)}%;top:${(Math.random() * 100).toFixed(1)}%;animation-delay:${(Math.random() * 1.8).toFixed(2)}s;animation-duration:${(2.2 + Math.random() * 2.2).toFixed(2)}s"></i>`;
   $("#inGrid").innerHTML = g;
-  setTimeout(finishIntro, 3600);
+  setTimeout(finishIntro, 4300);
   const skip = () => { finishIntro(); document.removeEventListener("click", skip); document.removeEventListener("keydown", skip); };
   document.addEventListener("click", skip);
   document.addEventListener("keydown", skip);
@@ -312,19 +312,36 @@ async function checkAi() {
   renderAiCatalog();
 }
 
+S.aiSort = S.aiSort || "weight";
+function sortCatalog(list) {
+  const arr = [...list];
+  if (S.aiSort === "accuracy") arr.sort((a, b) => (b.rank || 0) - (a.rank || 0) || b.gb - a.gb);
+  else arr.sort((a, b) => b.gb - a.gb);
+  return arr;
+}
 function renderAiCatalog() {
   const st = S.ai || { catalog: [], installed: [], running: false, current: "", ollama_installed: false, rec: "" };
   const inst = st.installed || [];
   const has = n => inst.some(x => x === n || x.indexOf(n.split(":")[0] + ":") === 0);
+  const cat = sortCatalog(st.catalog || []);
+  const recM = cat.find(m => m.name === st.rec);
+  const rest = cat.filter(m => m.name !== st.rec);
+  const row = (m, pinned) => `
+    <div class="ai-i${pinned ? " is-rec" : ""}"><span><b>${esc(m.name)}</b>${pinned ? ' <span class="rec-badge">✓ для твоего железа</span>' : ""}
+      <span class="dim">· ${esc(m.size)} · точность ${m.rank || 0}/100 · ${esc(m.desc)}</span></span>
+      <span style="display:flex;gap:6px;flex:0 0 auto">
+        ${has(m.name) ? `<button class="mini" data-use="${esc(m.name)}">${st.current === m.name ? "✓ выбрана" : "выбрать"}</button>` : ""}
+        <button class="mini" data-setup="${esc(m.name)}">${has(m.name) ? "⟳ заново" : "⬇ установить и использовать"}</button>
+      </span></div>`;
   $("#aiList").innerHTML =
-      `<div class="hw-rec">Железо: ${esc(st.rec_reason || "не определено")}. Для задач программы (короткая классификация «страна/ретро») рекомендуем <b>${esc(st.rec || "?")}</b>.</div>` +
-      (st.catalog || []).map(m => `
-      <div class="ai-i${m.name === st.rec ? " is-rec" : ""}"><span><b>${esc(m.name)}</b>${m.name === st.rec ? ' <span class="rec-badge">✓ рекомендация</span>' : ""}
-        <span class="dim">· ${esc(m.size)} · ${esc(m.desc)}</span></span>
-        <span style="display:flex;gap:6px;flex:0 0 auto">
-          ${has(m.name) ? `<button class="mini" data-use="${esc(m.name)}">${st.current === m.name ? "✓ выбрана" : "выбрать"}</button>` : ""}
-          <button class="mini" data-setup="${esc(m.name)}">${has(m.name) ? "⟳ заново" : "⬇ установить и использовать"}</button>
-        </span></div>`).join("") +
+      `<div class="hw-rec">Железо: ${esc(st.rec_reason || "не определено")}. Рекомендуем <b>${esc(st.rec || "?")}</b> — лучший баланс точности и скорости для задач программы (короткая классификация «страна/ретро» на русском).</div>
+      <div class="ai-sort"><span class="dim">Сортировка:</span>
+        <button class="mini${S.aiSort === "weight" ? " is-on" : ""}" data-sort="weight">по весу ↓</button>
+        <button class="mini${S.aiSort === "accuracy" ? " is-on" : ""}" data-sort="accuracy">по точности ↓</button>
+      </div>` +
+      (recM ? `<div class="ai-sec">★ Рекомендованная модель</div>${row(recM, true)}
+               <div class="ai-sec">Остальные модели (${rest.length})</div>` : "") +
+      rest.map(m => row(m, false)).join("") +
       (inst.length ? `<div class="hr"></div><div class="dim sm">Установленные модели (${inst.length}) — можно удалить из программы:</div>` +
         inst.map(n => `
         <div class="ai-i"><span>${esc(n)}${n === st.current ? ' <span class="dim"> · текущая</span>' : ""}</span>
@@ -334,6 +351,7 @@ function renderAiCatalog() {
       <div style="display:flex;gap:8px"><input type="text" id="aiModelCustom" placeholder="например mistral:latest" value="${esc(st.current || "")}">
       <button class="mini" id="btnCustomSetup">настроить</button></div>
       <div class="btnrow"><button class="mini danger" id="btnAiUninstall">🗑 Удалить Ollama из системы</button></div>`;
+  $$("#aiList [data-sort]").forEach(b => b.onclick = () => { S.aiSort = b.dataset.sort; renderAiCatalog(); });
   $$("#aiList [data-use]").forEach(b => b.onclick = async () => {
     const r = await call("set_config", { ai_model_name: b.dataset.use, use_local_ai: true });
     if (r && r.ok) { toast("ok", "Модель выбрана: " + b.dataset.use); S.ai.current = b.dataset.use; renderAiCatalog(); }
@@ -972,18 +990,25 @@ $$("#filters .chip").forEach(c => c.onclick = () => {
 });
 $("#search").addEventListener("input", debounce(e => { S.query = e.target.value.trim(); renderTable(); }, 220));
 
-/* ── прокрутка колесом: WebView2 теряет wheel на вложенных скроллах ── */
+/* ── прокрутка колесом: WebView2 теряет wheel на вложенных скроллах.
+   Крутим ближайший реально прокручиваемый предка; на его границе
+   передаём ход родителю (иначе список ловит колесо и не отпускает) ── */
+function canScroll(el, dy) {
+  if (!el || el === document.documentElement || el === document.body) return false;
+  const oy = getComputedStyle(el).overflowY;
+  if ((oy !== "auto" && oy !== "scroll") || el.scrollHeight <= el.clientHeight + 4) return false;
+  if (dy < 0 && el.scrollTop <= 0) return false;
+  if (dy > 0 && el.scrollTop + el.clientHeight >= el.scrollHeight - 1.5) return false;
+  return true;
+}
 document.addEventListener("wheel", e => {
   let el = e.target instanceof Element ? e.target : (e.target && e.target.parentElement);
   while (el && el !== document.body) {
-    if (el.scrollHeight > el.clientHeight + 4) {
-      const oy = getComputedStyle(el).overflowY;
-      if (oy === "auto" || oy === "scroll") { el.scrollTop += e.deltaY; e.preventDefault(); return; }
-    }
+    if (canScroll(el, e.deltaY)) { el.scrollTop += e.deltaY; e.preventDefault(); return; }
     el = el.parentElement;
   }
   const v = $(".view.is-on");
-  if (v && v.scrollHeight > v.clientHeight) { v.scrollTop += e.deltaY; e.preventDefault(); }
+  if (canScroll(v, e.deltaY)) { v.scrollTop += e.deltaY; e.preventDefault(); }
 }, { passive: false });
 
 /* ── heist-эффект кнопок ── */
@@ -1026,9 +1051,12 @@ function ensureHole() {
 }
 
 function maybeTour() {
-  const seen = localStorage.getItem("fs25_tour_done");
-  if (!seen) startTour();
-  else if (!S.probed) { S.probed = true; }
+  // Обучение обязательно при каждом запуске, пока пользователь не поставил
+  // галочку "больше не показывать" (fs25_tour_done больше не используется)
+  try { localStorage.removeItem("fs25_tour_done"); } catch (e) {}
+  let never = "";
+  try { never = localStorage.getItem("fs25_tour_never"); } catch (e) {}
+  if (!never) startTour();
 }
 
 function startTour() {
@@ -1045,6 +1073,7 @@ function ensureTourEl() {
   t.className = "tour"; t.id = "tour";
   t.innerHTML = `<h4 id="tourTitle"></h4><p id="tourText"></p>
     <div class="tour-foot"><div class="tour-dots" id="tourDots"></div>
+      <label class="tour-never" title="Тур больше не будет открываться автоматически"><input type="checkbox" id="tourNever"> больше не показывать</label>
       <button class="tour-skip" id="tourSkip">Пропустить</button>
       <button class="btn btn-accent sm" id="tourNext">Далее</button></div>`;
   document.body.appendChild(t);
@@ -1086,8 +1115,13 @@ function endTour() {
   S.tourStep = -1;
   const t = $("#tour"); if (t) t.hidden = true;
   const hole = ensureHole(); hole.hidden = true;
-  localStorage.setItem("fs25_tour_done", String(Date.now()));
-  toast("info", "Обучение завершено. Открыть заново — кнопка «?» внизу.");
+  const cb = $("#tourNever");
+  if (cb && cb.checked) {
+    try { localStorage.setItem("fs25_tour_never", "1"); } catch (e) {}
+    toast("ok", "Понял, больше не показывать. Вернуть тур — кнопка «? Обучение».");
+  } else {
+    toast("info", "Обучение завершено. Открыть заново — кнопка «? Обучение».");
+  }
 }
 window.addEventListener("resize", () => { if (S.tourStep >= 0) placeTour(); });
 

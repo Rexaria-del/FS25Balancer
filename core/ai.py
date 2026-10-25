@@ -297,6 +297,13 @@ MODEL_CATALOG = [
 ]
 
 
+# ранг по качеству именно для нашей задачи (короткая RU-классификация),
+# а не по размеру файла
+MODEL_RANKS = {"qwen2.5:7b": 96, "llama3.1:8b": 94, "mistral:latest": 90,
+               "phi3.5:latest": 80, "gemma3:4b": 78, "phi3:latest": 75,
+               "qwen2.5:3b": 70, "llama3.2:3b": 68, "gemma2:2b": 60,
+               "deepseek-r1:1.5b": 55, "llama3.2:1b": 45, "tinyllama:1.1b": 35}
+
 _HW_CACHE: Dict[str, Any] = {"ts": 0.0, "hw": None}
 
 
@@ -365,14 +372,8 @@ def recommend_model(hw: Optional[Dict[str, Any]] = None) -> Tuple[str, str, Dict
     budget = max(1.0, hw["ram_gb"] - 3.0)
     if hw["gpu_gb"] >= 3:
         budget = max(budget, min(hw["ram_gb"] - 2.0, hw["gpu_gb"] - 1.0))
-    # ранг по качеству именно для нашей задачи (короткая RU-классификация),
-    # а не по размеру файла
-    RANKS = {"qwen2.5:7b": 96, "llama3.1:8b": 94, "mistral:latest": 90,
-             "phi3.5:latest": 80, "gemma3:4b": 78, "phi3:latest": 75,
-             "qwen2.5:3b": 70, "llama3.2:3b": 68, "gemma2:2b": 60,
-             "deepseek-r1:1.5b": 55, "llama3.2:1b": 45, "tinyllama:1.1b": 35}
     feas = [m for m in MODEL_CATALOG if m["gb"] * 1.2 + 1.0 <= budget]
-    best = (max(feas, key=lambda m: (RANKS.get(m["name"], 0), m["gb"]))
+    best = (max(feas, key=lambda m: (MODEL_RANKS.get(m["name"], 0), m["gb"]))
             if feas else min(MODEL_CATALOG, key=lambda m: m["gb"]))
     reason = (f"ОЗУ {hw['ram_gb']:.0f} ГБ" +
               (f", {hw['gpu_name']} ({hw['gpu_gb']:.0f} ГБ VRAM)" if hw["gpu_gb"] >= 3 else ", дискретной GPU нет — расчёт на ОЗУ"))
@@ -382,7 +383,8 @@ def recommend_model(hw: Optional[Dict[str, Any]] = None) -> Tuple[str, str, Dict
 def model_catalog() -> Dict[str, Any]:
     ok, models = check_ollama()
     rec, reason, hw = recommend_model()
-    cat = [dict(m, size=(f"{m['gb']:.1f} ГБ")) for m in MODEL_CATALOG]
+    cat = [dict(m, size=f"{m['gb']:.1f} ГБ", rank=MODEL_RANKS.get(m["name"], 0))
+           for m in MODEL_CATALOG]
     return {"running": ok, "installed": models, "catalog": cat,
             "ollama_installed": bool(get_ollama_exe()),
             "rec": rec, "rec_reason": reason, "hw": hw}
