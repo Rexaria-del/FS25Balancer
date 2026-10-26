@@ -10,7 +10,8 @@ import xml.etree.ElementTree as ET
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from core.ai import detect_country_and_retro
-from core.ai_state import get_learned
+from core.ai_state import get_learned, get_spec_patches
+from core.specs import apply_patch, present_fields
 from core.models import BalancerConfig, ItemSpec, MotorSpec, ScanTarget
 from core.pricing import (
     FUEL_FILL_TYPES, PLACEABLE_CATEGORIES, VEHICLE_IGNORED_CATS, VEHICLE_IGNORED_FN,
@@ -263,6 +264,16 @@ def process_xml_root(root: ET.Element, rel_path: str, mod_name: str,
     is_field = is_field_xml(root, category, rel_path)
     is_place = is_placeable_xml(root, category, rel_path)
 
+    # ручные правки ТТХ применяются к дереву ДО извлечения характеристик:
+    # расчёт, предпросмотр и запись в файл видят уже изменённые значения
+    kind = "field" if is_field else ("placeable" if is_place else "vehicle")
+    patch = get_spec_patches().get(ukey)
+    if patch and kind != "field":
+        try:
+            apply_patch(root, patch, kind)
+        except Exception:
+            pass
+
     if cfg.scan_target == ScanTarget.VEHICLES and (is_field or is_place):
         return None
     if cfg.scan_target == ScanTarget.PLACEABLES and (is_field or not is_place):
@@ -301,6 +312,7 @@ def process_xml_root(root: ET.Element, rel_path: str, mod_name: str,
 
         return ItemSpec(
             mod_name=mod_name, xml_rel_path=rel_path, item_type="field",
+            spec_fields=present_fields(root, kind),
             title=title, brand=brand, category="field",
             category_label="Поле", country="—", country_flag="🌾",
             old_price=old_price, new_price=new_xml, new_price_rub=new_rub,
@@ -345,6 +357,7 @@ def process_xml_root(root: ET.Element, rel_path: str, mod_name: str,
 
         return ItemSpec(
             mod_name=mod_name, xml_rel_path=rel_path, item_type="placeable",
+            spec_fields=present_fields(root, kind),
             title=title, brand=brand, category=category,
             category_label=cat_info["label"], country=country, country_flag=flag,
             is_retro=is_retro, old_price=old_price,
@@ -430,6 +443,7 @@ def process_xml_root(root: ET.Element, rel_path: str, mod_name: str,
 
     return ItemSpec(
         mod_name=mod_name, xml_rel_path=rel_path, item_type="vehicle",
+        spec_fields=present_fields(root, kind),
         title=title, brand=brand, category=category,
         category_label=category, country=country, country_flag=flag,
         is_retro=is_retro, manual_price=(int(overrides[ukey]) if overrides and ukey in overrides else None),

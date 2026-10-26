@@ -112,10 +112,14 @@ def start_ollama(cb: Callable[[str], None]) -> bool:
     return False
 
 
-def stop_ollama(cb: Callable[[str], None]) -> None:
+def stop_ollama(cb: Callable[[str], None], also_tray: bool = False) -> None:
+    """Гасит службу и все загрузки моделей в VRAM (ollama_llama_server)."""
     try:
         if os.name == "nt":
-            for p in ("ollama.exe", "ollama_llama_server.exe"):
+            procs = ["ollama.exe", "ollama_llama_server.exe"]
+            if also_tray:
+                procs.append("ollama app.exe")
+            for p in procs:
                 subprocess.run(["taskkill", "/f", "/im", p], capture_output=True, **_no_window())
         else:
             subprocess.run(["pkill", "ollama"], capture_output=True)

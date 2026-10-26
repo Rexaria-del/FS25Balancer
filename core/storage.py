@@ -15,6 +15,7 @@ CACHE_FILE = "mods_cache_index.json"
 PLACEABLES_FILE = "learned_placeables.json"
 COUNTRIES_FILE = "selected_countries.json"
 LAST_SCAN_FILE = "last_scan.json"
+SPEC_PATCH_FILE = "spec_patches.json"
 
 
 def data_dir() -> str:

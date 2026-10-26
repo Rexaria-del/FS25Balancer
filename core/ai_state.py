@@ -12,6 +12,7 @@ _state: Dict[str, Any] = {
     "mods_cache": {},
     "placeables": {},
     "selected": [],
+    "spec_patches": {},
 }
 
 
@@ -25,6 +26,7 @@ def init_state() -> None:
     _state["learned"] = storage.load_json(storage.LEARNED_BRANDS_FILE, {})
     _state["mods_cache"] = storage.load_json(storage.CACHE_FILE, {})
     _state["placeables"] = storage.load_json(storage.PLACEABLES_FILE, {})
+    _state["spec_patches"] = storage.load_json(storage.SPEC_PATCH_FILE, {})
 
     sel = storage.load_json(storage.COUNTRIES_FILE, [])
     from core.countries import ALL_COUNTRIES, DEFAULT_SELECTED_COUNTRIES
@@ -53,6 +55,18 @@ def get_placeable_memory() -> Dict[str, dict]:
     return _state["placeables"]
 
 
+def get_spec_patches() -> Dict[str, Dict[str, float]]:
+    return _state["spec_patches"]
+
+
+def set_spec_patch(key: str, patch: Dict[str, float]) -> None:
+    if patch:
+        _state["spec_patches"][key] = dict(patch)
+    else:
+        _state["spec_patches"].pop(key, None)
+    storage.save_json(storage.SPEC_PATCH_FILE, _state["spec_patches"])
+
+
 def get_selected() -> List[str]:
     return _state["selected"]
 
@@ -68,6 +82,7 @@ def persist() -> None:
     storage.save_json(storage.CACHE_FILE, _state["mods_cache"])
     storage.save_json(storage.PLACEABLES_FILE, _state["placeables"])
     storage.save_json(storage.COUNTRIES_FILE, _state["selected"])
+    storage.save_json(storage.SPEC_PATCH_FILE, _state["spec_patches"])
 
 
 def remember_brand(brand: str, country: str, is_retro: bool = False) -> None:

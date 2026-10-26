@@ -7,12 +7,13 @@ UI не блокируется: все тяжёлые операции идут 
 
 import os, threading, time
 from collections import defaultdict
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from core import storage
 from core.ai_state import (
     clear_caches, get_learned, get_mods_cache, get_placeable_memory, get_pro_data,
-    get_selected, persist, remember_brand, set_pro_data, set_selected,
+    get_selected, get_spec_patches, persist, remember_brand, set_pro_data, set_selected,
+    set_spec_patch,
 )
 from core.models import BalancerConfig, ItemSpec, ScanStats, ScanTarget, SCAN_TARGET_LABELS
 from core.parser import process_mod, recalc_specs
@@ -73,6 +74,7 @@ class BalancerService:
             retro_enabled=bool(data.get("retro_enabled", True)),
             create_backups=bool(data.get("create_backups", True)),
             use_local_ai=bool(data.get("use_local_ai", True)),
+            stop_ai_on_close=bool(data.get("stop_ai_on_close", True)),
             ai_model_name=str(data.get("ai_model_name", "phi3")),
             scan_target=tgt,
             adjust_field_prices=bool(data.get("adjust_field_prices", False)),
@@ -97,6 +99,7 @@ class BalancerService:
             "k_retro": c.k_retro, "retro_wear": c.retro_wear,
             "retro_enabled": c.retro_enabled,
             "create_backups": c.create_backups, "use_local_ai": c.use_local_ai,
+            "stop_ai_on_close": c.stop_ai_on_close,
             "ai_model_name": c.ai_model_name, "scan_target": c.scan_target.name,
             "adjust_field_prices": c.adjust_field_prices,
             "field_max_distance": c.field_max_distance,
@@ -126,6 +129,7 @@ class BalancerService:
             "k_retro": c.k_retro, "retro_wear": c.retro_wear,
             "retro_enabled": c.retro_enabled,
             "create_backups": c.create_backups, "use_local_ai": c.use_local_ai,
+            "stop_ai_on_close": c.stop_ai_on_close,
             "ai_model_name": c.ai_model_name, "scan_target": c.scan_target.name,
             "scan_target_label": SCAN_TARGET_LABELS.get(c.scan_target, "Всё"),
             "adjust_field_prices": c.adjust_field_prices,
@@ -151,7 +155,8 @@ class BalancerService:
             "field_max_distance": (0.1, 20.0), "field_distance_spread": (0.0, 1.0),
         }
         BOOL_FIELDS = ("ac_mod_installed", "ac_converter", "ac_rate_auto", "ac_manual", "create_backups",
-                       "use_local_ai", "adjust_field_prices", "retro_enabled")
+                       "use_local_ai", "adjust_field_prices", "retro_enabled",
+                       "stop_ai_on_close")
         for k, v in (patch or {}).items():
             if k in FLOAT_FIELDS:
                 lo, hi = FLOAT_FIELDS[k]
@@ -468,6 +473,272 @@ class BalancerService:
                     return {"ok": True, "item": s.to_dict()}
         return {"ok": False, "error": "Комплектация не найдена"}
 
+    # ── Ручные правки ТТХ и разбор цены ──
+    SPEC_RAW_KEYS = {"hp": "hp", "max_speed": "spd", "capacity": "cap",
+                     "working_width": "ww", "needed_hp": "nhp", "production_cost": "prod",
+                     "slots": "slots"}
+
+    def _find_spec(self, key: str) -> Optional[ItemSpec]:
+        for s in self.specs:
+            if s.unique_key == key:
+                return s
+        return None
+
+    def _base_eur(self, s: ItemSpec, raw: Dict[str, Any]) -> float:
+        """Базовая цена (в EUR-семантике алгоритма) по переданным характеристикам."""
+        cat = raw.get("category") or s.category or "misc"
+        if s.item_type == "placeable":
+            return calc_placeable_price(
+                cat, s.title, s.xml_rel_path,
+                float(raw.get("cap", 0.0) or 0.0), int(raw.get("slots", 0) or 0),
+                float(raw.get("prod", 0.0) or 0.0), self.cfg.k_placeable,
+                self.cfg.global_difficulty_scale)
+        return calc_vehicle_price(
+            cat, float(raw.get("hp", 0.0) or 0.0), float(raw.get("spd", 0.0) or 0.0),
+            float(raw.get("cap", 0.0) or 0.0), float(raw.get("ww", 0.0) or 0.0),
+            float(raw.get("nhp", 0.0) or 0.0), 1.0, self.cfg.global_difficulty_scale)
+
+    @staticmethod
+    def _n(v: float) -> str:
+        return format(int(round(float(v))), ",").replace(",", " ")
+
+    def breakdown(self, s: ItemSpec, raw: Optional[Dict[str, Any]] = None,
+                  base_eur: Optional[float] = None, k_country: Optional[float] = None,
+                  k_retro: Optional[float] = None, dist: Optional[float] = None,
+                  area: Optional[float] = None) -> Dict[str, Any]:
+        """Человеческая расшифровка: из чего складывается итоговая цена позиции."""
+        from core.pricing import FIELD_BASE_PRICE_PER_HA, field_price
+        cfg = self.cfg
+        raw = raw if raw is not None else self._raw(s)
+        xm = cfg.xml_factor or 1.0
+        lines: List[Dict[str, Any]] = []
+
+        if s.item_type == "field":
+            a = s.field_area if (area is None and s.field_area > 0) else (area if area is not None else raw.get("area", 0.0))
+            d = dist if dist is not None else (None if s.field_distance < 0 else s.field_distance)
+            plain = field_price(float(a or 0.0), None, cfg)
+            priced = field_price(float(a or 0.0), d, cfg)
+            lines.append({"k": "Площадь поля", "v": ("%g га" % a) if a and a > 0 else "не определена (ручной ввод)"})
+            lines.append({"k": "База по площади", "v": "%s € · %.0f € за га, минимум 1500 €" % (self._n(plain / (cfg.k_field or 1.0)), FIELD_BASE_PRICE_PER_HA)})
+            if plain > 0 and priced != plain:
+                lines.append({"k": "Надбавка за близость к магазину",
+                              "v": "×%.2f · дистанция %s км (радиус %.1f км, сила %d%%)" % (
+                                  priced / plain, ("?" if d is None else "%g" % d),
+                                  cfg.field_max_distance, round(cfg.field_distance_spread * 100))})
+            elif cfg.adjust_field_prices and d is None:
+                lines.append({"k": "Надбавка за близость", "v": "не применена — нет дистанции", "warn": True})
+            lines.append({"k": "Коэф. полей (настройки)", "v": "×%.2f" % cfg.k_field})
+        else:
+            base_eur = base_eur if base_eur is not None else self._base_eur(s, raw)
+            if k_country is None:
+                k_country = cfg.multiplier_for(s.country) if s.country in _known() else 1.0
+            if k_retro is None:
+                k_retro = float(cfg.k_retro) if (s.is_retro and cfg.retro_enabled) else 1.0
+            priced = base_eur * k_country * k_retro
+            if s.item_type == "placeable":
+                lines.append({"k": "Класс объекта", "v": "%s · %s" % (s.category_label or "misc", s.size_label or "размер не определён")})
+                lines.append({"k": "Характеристики для расчёта",
+                              "v": "%s л · %d мест · производство %s" % (
+                                  self._n(raw.get("cap", 0.0)), int(raw.get("slots", 0) or 0),
+                                  self._n(raw.get("prod", 0.0)))})
+                lines.append({"k": "База по классу и размеру", "v": "%s €" % self._n(base_eur)})
+                lines.append({"k": "Коэф. зданий (настройки)", "v": "×%.2f" % cfg.k_placeable})
+            else:
+                lines.append({"k": "Класс техники", "v": s.category_label or "misc"})
+                lines.append({"k": "Характеристики для расчёта",
+                              "v": "%s л.с. · %s км/ч · %s л · захват %s м · треб. %s л.с." % (
+                                  self._n(raw.get("hp", 0.0)), self._n(raw.get("spd", 0.0)),
+                                  self._n(raw.get("cap", 0.0)), ("%g" % float(raw.get("ww", 0.0) or 0.0)),
+                                  self._n(raw.get("nhp", 0.0)))})
+                lines.append({"k": "База по ТТХ", "v": "%s €" % self._n(base_eur)})
+            lines.append({"k": "Коэф. страны «%s»" % s.country, "v": "×%.2f" % k_country})
+            if s.is_retro and cfg.retro_enabled:
+                lines.append({"k": "Коэф. ретро", "v": "×%.2f" % k_retro})
+                lines.append({"k": "Износ ретро (dailyUpkeep)", "v": "×%.2f" % (1.0 + float(cfg.retro_wear))})
+            elif s.is_retro:
+                lines.append({"k": "Ретро", "v": "помечено, но режим ретро выключен в настройках", "warn": True})
+
+        if s.item_type == "field":
+            a = area if area is not None else s.field_area
+            d = dist if dist is not None else (None if s.field_distance < 0 else s.field_distance)
+            auto_eur = field_price(float(a or 0.0), d, cfg)
+        else:
+            auto_eur = base_eur * k_country * k_retro  # type: ignore
+
+        auto_xml = clean_round(auto_eur * xm)
+        auto_rub = clean_round(cfg.rubles(auto_eur))
+        lines.append({"k": "Итог в рублях", "v": "%s ₽" % self._n(auto_rub), "hi": True})
+        if s.manual_price:
+            lines.append({"k": "Ручная цена (переопределяет расчёт)",
+                          "v": "%s · ₽-эквивалент %s" % (self._n(s.manual_price), self._n(clean_round_rub(int(s.manual_price), cfg)))})
+        lines.append({"k": "Что ляжет в файл мода",
+                      "v": "%s %s" % (self._n(s.manual_price or auto_xml),
+                                       "₽ напрямую" if cfg.write_direct_rubles else "€-база · игра сама домножит на %.2f" % cfg.exchange_rate)})
+        if s.item_type == "vehicle" and s.motor_prices:
+            for m in s.motor_prices:
+                lines.append({"k": "Комплектация «%s»" % m.get("label", "?"),
+                              "v": "%s л.с. · +%s = %s" % (self._n(m.get("hp", 0)), self._n(m.get("delta", 0)), self._n(m.get("total", 0)))})
+
+        return {
+            "lines": lines,
+            "base_price": clean_round((auto_eur if s.item_type != "field" else field_price(
+                float((area if area is not None else s.field_area) or 0.0), None, cfg)) * xm),
+            "auto_price": int(auto_xml),
+            "auto_price_rub": int(auto_rub),
+            "new_price": int(s.manual_price or auto_xml),
+            "price_eur": round(auto_eur, 2),
+            "k_country": round(float(k_country) if s.item_type != "field" else float(cfg.k_field), 3),
+            "k_retro": round(float(k_retro) if (s.item_type != "field" and k_retro is not None) else 1.0, 3),
+        }
+
+    def validate_specs(self, patch: Dict[str, Any]) -> Tuple[Dict[str, float], List[str]]:
+        from core.specs import SPEC_FIELDS
+        out: Dict[str, float] = {}
+        warns: List[str] = []
+        extra = {"area": (0.0, 5000.0), "distance": (-1.0, 50.0)}
+        for k, v in (patch or {}).items():
+            if k in extra:
+                try:
+                    f = float(v)
+                except (TypeError, ValueError):
+                    continue
+                if f == f:
+                    out[k] = min(extra[k][1], max(extra[k][0], f))
+                continue
+            if k == "slots":
+                warns.append("«Места» — только информация: количество слотов задаёт структура мода")
+                continue
+            meta = SPEC_FIELDS.get(k)
+            if not meta:
+                warns.append("Неизвестное поле: %s" % k)
+                continue
+            try:
+                f = float(v)
+            except (TypeError, ValueError):
+                warns.append("%s: нужно число, пропущено" % meta["label"])
+                continue
+            if f != f or f in (float("inf"), float("-inf")):
+                warns.append("%s: некорректное число" % meta["label"])
+                continue
+            out[k] = min(float(meta["max"]), max(float(meta["min"]), f))
+        return out, warns
+
+    def _merged_raw(self, s: ItemSpec, patch: Dict[str, float]) -> Dict[str, Any]:
+        raw = dict(self._raw(s))
+        for k, v in (patch or {}).items():
+            rk = self.SPEC_RAW_KEYS.get(k)
+            if rk:
+                raw[rk] = float(v)
+        return raw
+
+    def preview_specs(self, key: str, patch: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Предпросмотр без записи: какие цены получат правки ТТХ."""
+        with self._lock:
+            s = self._find_spec(key)
+            if not s:
+                return {"ok": False, "error": "Позиция не найдена"}
+            clean, warns = self.validate_specs(patch or {})
+            if s.item_type == "field":
+                raw = self._raw(s)
+                area = float(clean["area"]) if "area" in clean else (s.field_area or float(raw.get("area", 0.0)))
+                dist = (None if float(clean["distance"]) < 0 else float(clean["distance"])) \
+                    if "distance" in clean else (None if s.field_distance < 0 else s.field_distance)
+                bd = self.breakdown(s, raw=raw, area=area, dist=dist)
+            else:
+                raw = self._merged_raw(s, clean)
+                base_eur = self._base_eur(s, raw)
+                k_country = (self.cfg.multiplier_for(s.country)
+                             if s.country in _known() else 1.0)
+                k_retro = float(self.cfg.k_retro) if (s.is_retro and self.cfg.retro_enabled) else 1.0
+                bd = self.breakdown(s, raw=raw, base_eur=base_eur, k_country=k_country, k_retro=k_retro)
+            bd["warnings"] = warns
+            bd["patch"] = clean
+            bd["item"] = s.to_dict()
+            bd["current_price"] = int(s.new_price)
+            bd["diff"] = int(bd["auto_price"]) - int(s.manual_price or s.new_price)
+            return {"ok": True, **bd}
+
+    def update_specs(self, key: str, patch: Dict[str, Any]) -> Dict[str, Any]:
+        """Сохраняет правки ТТХ: патч ляжет в XML при «Применить», цена пересчитывается сразу."""
+        with self._lock:
+            s = self._find_spec(key)
+            if not s:
+                return {"ok": False, "error": "Позиция не найдена"}
+            if s.item_type == "field":
+                return {"ok": False, "error": "Для поля используй площадь и дистанцию"}
+            clean, warns = self.validate_specs(patch or {})
+            if not clean:
+                return {"ok": False, "error": warns and " ".join(warns) or "Нет корректных значений"}
+            store = dict(get_spec_patches().get(key, {}))
+            store.update(clean)
+            set_spec_patch(key, store)
+            raw = self.raw_cache.setdefault(key, self._raw(s))
+            for k, v in clean.items():
+                rk = self.SPEC_RAW_KEYS.get(k)
+                if rk:
+                    raw[rk] = v
+            if "hp" in clean:
+                s.hp = clean["hp"]
+                if s.motors:
+                    delta = clean["hp"] - float(s.motors[0].hp)
+                    for m in s.motors:
+                        m.hp = max(0.0, float(m.hp) + delta)
+            if "max_speed" in clean:
+                s.max_speed = clean["max_speed"]
+                for m in s.motors:
+                    m.max_speed = clean["max_speed"]
+            if "capacity" in clean:
+                s.capacity = clean["capacity"]
+            if "working_width" in clean:
+                s.working_width = clean["working_width"]
+            if "needed_hp" in clean:
+                s.needed_hp = clean["needed_hp"]
+            if "production_cost" in clean:
+                s.production_cost = clean["production_cost"]
+            self.reprice_item(s)
+            d = s.to_dict()
+            d["spec_patch"] = store
+            bd = self.breakdown(s)
+            bd["warnings"] = warns
+            return {"ok": True, "item": d, "breakdown": bd, "warnings": warns}
+
+    def reset_specs(self, key: str) -> Dict[str, Any]:
+        """Сбрасывает ручные правки позиции и берёт ТТХ заново из файла мода."""
+        with self._lock:
+            s = self._find_spec(key)
+            if not s:
+                return {"ok": False, "error": "Позиция не найдена"}
+            set_spec_patch(key, {})
+            mod_path = os.path.join(self.cfg.mods_dir, s.mod_name)
+            if not (os.path.exists(mod_path)):
+                self.reprice_item(s)
+                return {"ok": True, "item": s.to_dict(),
+                        "note": "файл мода не найден — верни значения сканированием"}
+            import copy
+            tmp_cfg = copy.deepcopy(self.cfg)
+            tmp_cfg.use_local_ai = False          # сброс не должен дёргать ИИ
+            try:
+                specs = process_mod(mod_path, tmp_cfg, False, None, self.overrides)
+            except Exception as e:
+                return {"ok": False, "error": "Не удалось перечитать мод: %s" % e}
+            fresh = next((x for x in specs if x.unique_key == key), None)
+            if not fresh:
+                return {"ok": False, "error": "Позиция не найдена в файле мода"}
+            fresh.country, fresh.country_flag = s.country, s.country_flag
+            fresh.is_retro = s.is_retro
+            fresh.manual_price = s.manual_price
+            if s.ai_reason == "Вручную":
+                fresh.ai_reason, fresh.needs_review = s.ai_reason, False
+            try:
+                self.specs[self.specs.index(s)] = fresh
+            except ValueError:
+                self.specs.append(fresh)
+            self.raw_cache[key] = _raw_of(fresh)
+            self.reprice_item(fresh)
+            d = fresh.to_dict()
+            d["spec_patch"] = {}
+            return {"ok": True, "item": d, "breakdown": self.breakdown(fresh)}
+
     def patch_field(self, key: str, area: Optional[float] = None,
                     distance: Optional[float] = None) -> Dict[str, Any]:
         """Ручной ввод га/дистанции для поля. distance < 0 = неизвестна."""
@@ -581,8 +852,14 @@ class BalancerService:
         return {"ok": True}
 
     def items_payload(self) -> List[Dict[str, Any]]:
+        patches = get_spec_patches()
         with self._lock:
-            return [s.to_dict() for s in self.specs]
+            out = []
+            for s in self.specs:
+                d = s.to_dict()
+                d["spec_patch"] = patches.get(s.unique_key, {})
+                out.append(d)
+            return out
 
 
 def clean_round_rub(price_xml: int, cfg: BalancerConfig) -> int:

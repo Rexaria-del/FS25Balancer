@@ -40,6 +40,15 @@ CHANGELOG = [
         "Глобальный коэффициент сложности заменён индивидуальным коэффициентом каждой выбранной страны",
         "История обновлений в приложении",
     ]},
+    {"v": "15.4", "date": "2026-10-26", "items": [
+        "Редактор характеристик по двойному клику: техника, здания, производства",
+        "Живой предпросмотр цены при изменении характеристик (панель разбора)",
+        "Кнопка «Из файла» — сброс правок к оригинальным значениям мода",
+        "Редактирование мощности конкретной комплектации двигателя",
+        "Редактирование характеристик зданий (вместимость, стоимость, слоты)",
+        "Автоматическое завершение ИИ-служб при закрытии программы",
+        "Фикс: производство — единообразная запись costsPerActiveHour",
+    ]},
     {"v": "14.0", "date": "2026-10-20", "items": [
         "Все страны мира, ретро-детект, комплектации",
     ]},
@@ -63,9 +72,46 @@ class Api:
         self._svc.load_settings()
         self._win = None
         self._ai_cache = {"running": False, "models": []}
+        self._closing = False
 
     def bind(self, win):
         self._win = win
+        for ev_name in ("closed", "closing"):
+            ev = getattr(win.events, ev_name, None)
+            if ev is not None:
+                try:
+                    ev += self._on_window_close
+                except Exception:
+                    pass
+
+    def _on_window_close(self) -> None:
+        self.shutdown_on_close()
+
+    def shutdown_on_close(self) -> None:
+        """При закрытии окна гасим Ollama и загруженные модели (если не отключено в настройках)."""
+        if self._closing:
+            return
+        self._closing = True
+        try:
+            if not bool(getattr(self._svc.cfg, "stop_ai_on_close", True)):
+                print('[exit] stop_ai_on_close=False — Ollama оставлена работать', flush=True)
+                return
+            from core import ai as ai_mod
+            ok, _ = ai_mod.check_ollama()
+            if not ok:
+                exe = ai_mod.get_ollama_exe()
+                if not exe:
+                    return
+            ai_mod.stop_ollama(lambda m: print("[exit]", m, flush=True), also_tray=True)
+            import datetime
+            with open(storage.path_of("crash.log"), "a", encoding="utf-8") as f:
+                f.write("[exit] Ollama и модели остановлены @ " + str(datetime.datetime.now().time()) + chr(10))
+        except Exception as e:
+            print("[exit] не удалось остановить ИИ:", e, flush=True)
+
+    def stop_ai_now(self) -> dict:
+        self.shutdown_on_close()
+        return {"ok": True}
 
     def log(self, msg) -> dict:
         try:
@@ -170,6 +216,33 @@ class Api:
         except (TypeError, ValueError) as e:
             return {"ok": False, "error": f"Мотор: {e}"}
 
+    def preview_specs(self, key, patch=None) -> dict:
+        try:
+            return self._svc.preview_specs(str(key), dict(patch or {}))
+        except Exception as e:
+            return {"ok": False, "error": "Предпросмотр ТТХ: " + str(e)}
+
+    def update_specs(self, key, patch=None) -> dict:
+        try:
+            return self._svc.update_specs(str(key), dict(patch or {}))
+        except Exception as e:
+            return {"ok": False, "error": "ТТХ: " + str(e)}
+
+    def reset_specs(self, key) -> dict:
+        try:
+            return self._svc.reset_specs(str(key))
+        except Exception as e:
+            return {"ok": False, "error": "Сброс ТТХ: " + str(e)}
+
+    def breakdown(self, key) -> dict:
+        try:
+            s = self._svc._find_spec(str(key))
+            if not s:
+                return {"ok": False, "error": "Позиция не найдена"}
+            return {"ok": True, "breakdown": self._svc.breakdown(s), "item": s.to_dict()}
+        except Exception as e:
+            return {"ok": False, "error": "Разбор цены: " + str(e)}
+
     def patch_field(self, key: str, area, distance) -> dict:
         try:
             a = None if area in (None, "", -999) else float(area)
@@ -196,6 +269,8 @@ class Api:
         return d
 
     def _refresh_ai(self) -> None:
+        if self._closing:
+            return
         try:
             from core.ai import check_ollama
             ok, models = check_ollama()
@@ -405,7 +480,11 @@ def main():
     win.events.loaded += lambda: print("[boot] event loaded", flush=True)
     win.events._pywebviewready += lambda: print("[boot] event pywebviewready", flush=True)
     print("[boot] window created; starting webview", flush=True)
-    webview.start(debug=bool(os.environ.get("FS25_DEBUG")), private_mode=False)
+    try:
+        webview.start(debug=bool(os.environ.get("FS25_DEBUG")), private_mode=False)
+    finally:
+        # fallback: если события closed/closing не сработали (разные бэкенды pywebview)
+        api.shutdown_on_close()
 
 
 if __name__ == "__main__":

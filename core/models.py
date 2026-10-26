@@ -40,6 +40,7 @@ class BalancerConfig:
     global_difficulty_scale: float = 1.0
     create_backups: bool = True
     use_local_ai: bool = True
+    stop_ai_on_close: bool = True     # гасить Ollama и модели при закрытии программы
     ai_model_name: str = "phi3"
     scan_target: ScanTarget = ScanTarget.ALL
     adjust_field_prices: bool = False
@@ -122,6 +123,7 @@ class ItemSpec:
     field_coord: Optional[Tuple[float, float]] = None
     field_manual: bool = False
     xml_node_path: str = ""
+    spec_fields: List[str] = field(default_factory=list)
 
     @property
     def unique_key(self) -> str:

@@ -304,6 +304,7 @@ function applyConfigToUI(c) {
   $("#maxD").value = c.field_max_distance;
   $("#spread").value = Math.round(c.field_distance_spread * 100);
   $("#backups").checked = !!c.create_backups;
+  $("#stopAiClose").checked = c.stop_ai_on_close !== false;
   $("#useAi").checked = !!c.use_local_ai;
   { const t = $("#aiModelCurTxt"); if (t && c.ai_model_name) t.textContent = c.ai_model_name; }
   $("#shopX").value = (c.shop_coordinates.shop || [0, 0])[0];
@@ -624,7 +625,7 @@ function rowEl(it) {
       <span class="fl">${it.country_flag}</span><em>${esc(it.country)}</em></span>
     <span class="c-retro"><span class="mini-sw${it.is_retro ? " is-on" : ""}${(S.boot && S.boot.config.retro_enabled === false) ? " is-dis" : ""}" data-retro="${esc(it.unique_key)}"
       title="Ретро: цена × коэффициент ретро"><i></i></span></span>
-    <span class="c-specs" title="${specs}">${specs}</span>
+    <span class="c-specs" data-specs="${esc(it.unique_key)}" title="Клик или двойной клик — правка характеристик и разбор цены">${specs}</span>
     <span class="c-old">${fmt(it.old_price)}</span>
     <span class="c-base">${fmt(it.base_price)}</span>
     ${priceCell(it)}
@@ -645,6 +646,8 @@ $("#tbody").addEventListener("click", e => {
   if (sw) { toggleRetro(sw.dataset.retro, !sw.classList.contains("is-on")); return; }
   const pb = e.target.closest("[data-price]");
   if (pb) { openPriceMenu(pb.dataset.price, pb); return; }
+  const sp = e.target.closest("[data-specs]");
+  if (sp) { openTtx(sp.dataset.specs); return; }
   const cc = e.target.closest("[data-country]");
   if (cc) { openCountryPicker(cc.dataset.country, cc); return; }
 });
@@ -770,98 +773,230 @@ function applyMotorPrice(key, m) {
   call("set_price", key, m.total);
 }
 
-/* ── модалка ТТХ / ручной цены ── */
+/* ── модалка ТТХ: поля только того класса, что есть в XML + разбор цены ── */
+const SPEC_META = {
+  hp: { label: "Мощность двигателя", unit: "л.с.", min: 0, max: 3000, step: 1 },
+  max_speed: { label: "Максимальная скорость", unit: "км/ч", min: 0, max: 200, step: 1 },
+  capacity: { label: "Вместимость", unit: "л", min: 0, max: 500000, step: 50 },
+  working_width: { label: "Ширина захвата", unit: "м", min: 0, max: 60, step: 0.1 },
+  needed_hp: { label: "Требуемая мощность", unit: "л.с.", min: 0, max: 3000, step: 1 },
+  production_cost: { label: "Стоимость производства", unit: "за час", min: 0, max: 100000, step: 10 },
+  slots: { label: "Места (слоты/стенды)", unit: "шт", min: 0, max: 512, step: 1, readonly: true },
+};
 let ttxKey = null;
+let ttxTimer = 0;
+
+function specValue(it, k) {
+  const map = { hp: it.hp, max_speed: it.max_speed, capacity: it.capacity,
+                working_width: it.working_width, needed_hp: it.needed_hp,
+                production_cost: it.production_cost, slots: it.slots };
+  const v = Number(map[k] || 0);
+  return isFinite(v) ? v : 0;
+}
+
+function specForm(it) {
+  const fields = (it.spec_fields || []).filter(k => SPEC_META[k]);
+  const patch = it.spec_patch || {};
+  if (!fields.length) {
+    return '<div class="dim sm">В файле этой позиции нет редактируемых характеристик — доступна своя цена.</div>';
+  }
+  return `<div class="ctx-h" style="padding-left:0">Характеристики · только те, что есть в этом файле мода</div>
+    <div class="spec-grid">` + fields.map(k => {
+      const m = SPEC_META[k];
+      const stored = patch[k] != null ? Number(patch[k]) : null;
+      const v = stored != null ? stored : specValue(it, k);
+      const shown = m.step === 0.1 ? v.toFixed(1) : String(Math.round(v));
+      return `<div class="spec-r${stored != null ? " is-patched" : ""}">
+        <label>${m.label}${stored != null ? ' <em class="pbadge">изменено</em>' : ""}</label>
+        <input type="number" data-spec="${k}" min="${m.min}" max="${m.max}" step="${m.step}" value="${shown}"${m.readonly ? " disabled" : ""}>
+        <span class="unit">${m.unit}</span>
+      </div>`;
+    }).join("") + `</div>
+    <div class="dim sm">Правки ложатся в XML мода при «Применить» (с бэкапом в _backup_original_mods). До этого — только предпросмотр.</div>`;
+}
+
+function motorsForm(it) {
+  if (!it.motors || !it.motors.length) return "";
+  return `<div class="ctx-h" style="padding-left:0">Комплектации двигателя</div>
+    <div class="mrow head"><label>Название</label><label>Л.С.</label><label>Наценка</label></div>` +
+    it.motors.map(m => `
+      <div class="mrow">
+        <input type="text" data-mlabel="${m.index}" value="${esc(m.label)}">
+        <input type="number" data-mhp="${m.index}" min="0" max="2000" step="1" value="${Math.round(m.hp || 0)}">
+        <input type="number" data-mprice="${m.index}" min="0" step="100" value="${Math.round(m.price_delta || 0)}">
+      </div>`).join("");
+}
+
+function priceRow(it) {
+  return `<div class="mrow">
+      <label>Своя цена (${it.item_type === "vehicle" ? "базовая" : ""})</label>
+      <input type="number" id="mPrice" min="50" step="100" value="${it.manual_price != null ? it.manual_price : 0}">
+      <span class="dim">0 = авторасчёт</span></div>`;
+}
+
+function fieldForm(it) {
+  return `${it.needs_review ? `<div class="mnote">⚠️ ${esc(it.ai_reason)} — подтверди или впиши значения вручную.</div>` : ""}
+    <div class="spec-grid">
+      <div class="spec-r"><label>Площадь</label>
+        <input type="number" data-spec="area" id="fArea" min="0" max="5000" step="0.1" value="${it.field_area || 0}">
+        <span class="unit">га</span></div>
+      <div class="spec-r"><label>Дистанция до магазина</label>
+        <input type="number" data-spec="distance" id="fDist" min="-1" max="50" step="0.1" value="${it.field_distance}">
+        <span class="unit">км · -1 = неизвестно</span></div>
+    </div>
+    <div class="mrow">
+      <label>Своя цена</label>
+      <input type="number" id="mPrice" min="50" step="100" value="${it.manual_price != null ? it.manual_price : 0}">
+      <span class="dim">0 = авторасчёт</span></div>
+    <div class="dim sm">Координаты поля: ${it.field_coord ? it.field_coord.map(n => Math.round(n)).join(" / ") : "не найдены"}</div>`;
+}
+
 function openTtx(key) {
   const it = S.items.get(key);
   if (!it) return;
   ttxKey = key;
-  $("#modalTitle").textContent = `${it.type_icon} ${it.title}`;
-  let html = "";
+  $("#modalTitle").textContent = it.type_icon + " " + it.title + " · " + (it.category_label || it.item_type);
+  let html;
   if (it.item_type === "field") {
-    html = `
-      ${it.needs_review ? `<div class="mnote">⚠️ ${esc(it.ai_reason)} — подтверди или впиши значения вручную.</div>` : ""}
-      <div class="mrow"><label>Площадь, га</label>
-        <input type="number" id="fArea" min="0" max="5000" step="0.1" value="${it.field_area || 0}">
-        <span class="dim">поиск: 1 га = 10 000 м²</span></div>
-      <div class="mrow"><label>Дистанция до магазина, км</label>
-        <input type="number" id="fDist" min="-1" max="50" step="0.1" value="${it.field_distance}">
-        <span class="dim">-1 = неизвестно</span></div>
-      <div class="mrow"><label>Своя цена</label>
-        <input type="number" id="fPrice" min="50" step="100" value="${it.new_price}">
-        <span class="dim">0 = авторасчёт</span></div>
-      <div class="dim sm">Координаты поля: ${it.field_coord ? it.field_coord.map(n => Math.round(n)).join(" / ") : "не найдены"}</div>`;
+    html = fieldForm(it);
   } else {
-    html = `<div class="mrow"><label>Своя цена (${it.item_type === "vehicle" ? "базовая" : ""})</label>
-        <input type="number" id="mPrice" min="50" step="100" value="${it.manual_price != null ? it.manual_price : 0}">
-        <span class="dim">0 = авторасчёт</span></div>
-      <div class="dim sm">Страна: ${it.country_flag} ${esc(it.country)} · кC=${fmt2(it.country_mult)} ·
-        кРетро=${fmt2(it.retro_mult)} · изношенный коэффициент=${fmt2(it.wear_mult)}</div>`;
-    if (it.motors && it.motors.length) {
-      html += `<div class="ctx-h" style="padding-left:0">Комплектации (ТТХ двигателя)</div>
-        <div class="mrow"><label>Название</label><label>Л.С.</label><label>Наценка</label></div>` +
-        it.motors.map(m => `
-          <div class="mrow">
-            <input type="text" data-mlabel="${m.index}" value="${esc(m.label)}">
-            <input type="number" data-mhp="${m.index}" min="0" max="2000" step="1" value="${m.hp}">
-            <input type="number" data-mprice="${m.index}" min="0" step="100" value="${m.price_delta}">
-          </div>`).join("");
-    }
+    html = specForm(it) + motorsForm(it) + priceRow(it);
   }
+  html += `<div class="bd-wrap">
+    <div class="ctx-h" style="padding-left:0">Из чего складывается цена</div>
+    <div id="mBreak" class="bd"><div class="dim sm">считаю…</div></div></div>`;
   $("#modalBody").innerHTML = html;
   $("#modal").hidden = false;
   $("#modalSave").dataset.mode = it.item_type === "field" ? "field" : "item";
+  $$("#modalBody [data-spec]").forEach(el => {
+    if (el.disabled) return;
+    el.addEventListener("input", () => schedulePreview());
+    el.addEventListener("change", () => schedulePreview());
+  });
+  schedulePreview(0);
 }
-function closeTtx() { $("#modal").hidden = true; ttxKey = null; }
+
+function collectPatch() {
+  const it = S.items.get(ttxKey);
+  if (!it) return {};
+  const p = {};
+  $$("#modalBody [data-spec]").forEach(el => {
+    if (el.disabled) return;
+    const k = el.dataset.spec;
+    const v = parseFloat(el.value);
+    if (!isFinite(v)) return;
+    if (k === "area" || k === "distance") { p[k] = v; return; }
+    const before = specValue(it, k);
+    if (Math.abs(v - before) > 1e-9) p[k] = v;
+  });
+  return p;
+}
+
+function schedulePreview(delay) {
+  clearTimeout(ttxTimer);
+  ttxTimer = setTimeout(previewNow, delay === 0 ? 0 : 220);
+}
+
+async function previewNow() {
+  if (!ttxKey) return;
+  const r = await call("preview_specs", ttxKey, collectPatch());
+  if (!r || !r.ok) return;
+  renderBreakdown(r);
+}
+
+function renderBreakdown(r) {
+  const box = $("#mBreak");
+  if (!box) return;
+  const diff = Math.round(Number(r.diff || 0));
+  const cur = Number(r.current_price || 0);
+  const pct = cur ? Math.round(diff / cur * 100) : 0;
+  box.innerHTML = (r.lines || []).map(l =>
+    `<div class="bd-line${l.hi ? " is-hi" : ""}${l.warn ? " is-warn" : ""}"><span>${esc(l.k)}</span><b>${esc(l.v)}</b></div>`).join("") +
+    `<div class="bd-total"><span>Живой предпросмотр</span><b class="${diff > 0 ? "up" : diff < 0 ? "down" : ""}">${fmt(r.auto_price_rub || 0)} ₽` +
+    (diff ? ` <i>${diff > 0 ? "+" : "−"}${fmt(Math.abs(diff))} · ${pct > 0 ? "+" : ""}${pct}%</i>` : " <i>без изменений</i>") + `</b></div>` +
+    ((r.warnings || []).length ? `<div class="bd-warn">${r.warnings.map(w => "⚠️ " + esc(w)).join("<br>")}</div>` : "");
+}
+
+function closeTtx() {
+  $("#modal").hidden = true;
+  ttxKey = null;
+  clearTimeout(ttxTimer);
+}
 $("#modalCancel").onclick = closeTtx;
 $("#modal").addEventListener("click", e => { if (e.target.id === "modal") closeTtx(); });
 
+$("#modalReset").onclick = async () => {
+  if (!ttxKey) return;
+  const key = ttxKey;
+  const r = await call("reset_specs", key);
+  if (!r || !r.ok) return toast("err", (r && r.error) || "Не удалось вернуть значения из файла");
+  S.items.set(key, r.item);
+  patchRow(r.item);
+  updateStats();
+  toast("ok", r.note ? "Готово: " + r.note : "Характеристики взяты заново из файла мода");
+  openTtx(key);
+};
+
 $("#modalSave").onclick = async () => {
   if (!ttxKey) return closeTtx();
-  const it = S.items.get(ttxKey);
-  if ($("#modalSave").dataset.mode === "field") {
-    const area = $("#fArea").value, dist = $("#fDist").value, price = $("#fPrice").value;
-    const a = clampNum(area, 0, 5000, NaN), d = clampNum(dist, -1, 50, NaN);
+  const key = ttxKey;
+  const mode = $("#modalSave").dataset.mode;
+  const price = clampNum($("#mPrice").value, 0, 1000000000, 0);
+
+  if (mode === "field") {
+    const p = collectPatch();
+    const a = p.area, d = p.distance;
     if (!isFinite(a)) { markBad("#fArea"); return toast("err", "Площадь должна быть числом 0..5000"); }
     if (!isFinite(d)) { markBad("#fDist"); return toast("err", "Дистанция должна быть числом (-1 = неизвестно)"); }
-    const r = await call("patch_field", ttxKey, a, d);
+    const r = await call("patch_field", key, a, d);
     if (!r || !r.ok) return toast("err", (r && r.error) || "Ошибка сохранения поля");
-    S.items.set(ttxKey, r.item);
-    const p = clampNum(price, 0, 100000000, 0);
-    if (p > 0) { const r2 = await call("set_price", ttxKey, p); if (r2 && r2.ok) S.items.set(ttxKey, r2.item); }
-    patchRow(r.item);
-    toast("ok", "Поле обновлено");
-  } else {
-    const price = clampNum($("#mPrice").value, 0, 100000000, 0);
+    S.items.set(key, r.item);
     if (price > 0) {
-      const r = await call("set_price", ttxKey, price);
-      if (!r || !r.ok) return toast("err", (r && r.error) || "Ошибка цены");
-      S.items.set(ttxKey, r.item);
-    } else {
-      const idx = $$("#modalBody [data-mhp]");
-      for (const el of idx) {
-        const i = Number(el.dataset.mhp);
-        const hpEl = $(`#modalBody [data-mhp="${i}"]`), prEl = $(`#modalBody [data-mprice="${i}"]`);
-        const lbEl = $(`#modalBody [data-mlabel="${i}"]`);
-        const hp = clampNum(hpEl.value, 0, 2000, NaN);
-        const dp = clampNum(prEl.value, 0, 5000000, NaN);
-        if (!isFinite(hp)) { markBad(`#modalBody [data-mhp="${i}"]`); return toast("err", `Л.С. комплектации ${i + 1}: нужно число`); }
-        if (!isFinite(dp)) { markBad(`#modalBody [data-mprice="${i}"]`); return toast("err", `Наценка ${i + 1}: нужно число`); }
-        if (lbEl) it.motors[i].label = lbEl.value || it.motors[i].label;
-        const r = await call("set_motor", ttxKey, i, hp, Math.round(dp));
-        if (!r || !r.ok) return toast("err", (r && r.error) || "Ошибка ТТХ");
-        S.items.set(ttxKey, r.item);
-      }
-      if (!$$("#modalBody [data-mhp]").length) {
-        const r = await call("set_price", ttxKey, it.new_price);
-        if (r && r.ok) S.items.set(ttxKey, r.item);
-      }
+      const r2 = await call("set_price", key, price);
+      if (r2 && r2.ok) S.items.set(key, r2.item);
     }
-    patchRow(S.items.get(ttxKey));
-    toast("ok", "ТТХ сохранены");
+    patchRow(S.items.get(key));
+    updateStats();
+    toast("ok", "Поле обновлено");
+    closeTtx();
+    return;
   }
+
+  const sp = collectPatch();
+  let specsSaved = false;
+  if (Object.keys(sp).length) {
+    const r = await call("update_specs", key, sp);
+    if (!r || !r.ok) return toast("err", (r && r.error) || "Не удалось сохранить ТТХ");
+    S.items.set(key, r.item);
+    specsSaved = true;
+    if ((r.warnings || []).length) toast("warn", r.warnings.join(" · "), 7000);
+  }
+
+  if (price > 0) {
+    const r = await call("set_price", key, price);
+    if (!r || !r.ok) return toast("err", (r && r.error) || "Ошибка цены");
+    S.items.set(key, r.item);
+  } else {
+    for (const el of $$("#modalBody [data-mhp]")) {
+      const i = Number(el.dataset.mhp);
+      const hpEl = $("#modalBody [data-mhp=\"" + i + "\"]");
+      const prEl = $("#modalBody [data-mprice=\"" + i + "\"]");
+      const lbEl = $("#modalBody [data-mlabel=\"" + i + "\"]");
+      const hp = clampNum(hpEl.value, 0, 2000, NaN);
+      const dp = clampNum(prEl.value, 0, 1000000000, NaN);
+      if (!isFinite(hp)) { markBad("#modalBody [data-mhp=\"" + i + "\"]"); return toast("err", "Л.С. комплектации " + (i + 1) + ": нужно число"); }
+      if (!isFinite(dp)) { markBad("#modalBody [data-mprice=\"" + i + "\"]"); return toast("err", "Наценка " + (i + 1) + ": нужно число"); }
+      const it = S.items.get(key);
+      if (lbEl && it.motors[i]) it.motors[i].label = lbEl.value || it.motors[i].label;
+      const r = await call("set_motor", key, i, hp, Math.round(dp));
+      if (!r || !r.ok) return toast("err", (r && r.error) || "Ошибка ТТХ двигателя");
+      S.items.set(key, r.item);
+    }
+  }
+  patchRow(S.items.get(key));
   updateStats();
-  closeTtx();
+  toast("ok", specsSaved ? "ТТХ сохранены, цена пересчитана" : "Сохранено");
+  if (specsSaved) openTtx(key); else closeTtx();
 };
 
 function markBad(sel) {
@@ -1076,6 +1211,7 @@ function bindSettings() {
   const sw = [
     ["acMod", "ac_mod_installed"], ["acConv", "ac_converter"], ["adjFields", "adjust_field_prices"],
     ["backups", "create_backups"], ["useAi", "use_local_ai"], ["retroOn", "retro_enabled"],
+    ["stopAiClose", "stop_ai_on_close"],
   ];
   for (const [id, key] of sw) {
     document.getElementById(id).addEventListener("change", async e => {
@@ -1324,7 +1460,9 @@ const TOUR = [
   { sel: ".thead .c-retro", title: "Ретро-тумблер",
     text: "Переключатель в строке делает технику ретро: цена умножается на коэффициент ретро, а dailyUpkeep — на коэффициент износа." },
   { sel: ".thead .c-new", title: "Комплектации",
-    text: "Клик по цене откроет список комплектаций двигателя с разными л.с. и ценами; «Своя цена / правка ТТХ» — ручной ввод характеристик." },
+    text: "Клик по цене откроет список комплектаций двигателя с разными л.с. и ценами; «Своя цена» — ручной ввод." },
+  { sel: ".thead .c-specs", title: "Правка характеристик",
+    text: "Клик (или двойной клик) по колонке «Хар-ки» открывает редактор: показаны только те характеристики, которые реально есть в XML этой позиции — л.с. и макс. скорость у техники, вместимость, места и производство у здания, площадь и дистанция у поля. Справа внизу живой разбор: база → коэффициент страны → ретро → итог в ₽, и дельта видна ещё до сохранения." },
   { sel: '[data-view="fields"]', title: "Поля и расстояние",
     text: "Включи «Изменять цены на поля» и укажи координаты магазина: чем ближе поле, тем дороже. Если площадь или дистанция не определились — строка попадёт на ручное подтверждение." },
   { sel: "#btnApply", title: "Применить",
@@ -1454,6 +1592,9 @@ const CHANGELOG = [
     "Автодетект мода и рублёвого курса из currencies.xml в папке mods (112.66 по умолчанию)",
     "Глобальный коэффициент сложности убран: у каждой выбранной страны свой множитель 0.05–10 с числовым полем, поиском и сбросом к дефолту",
     "Смена курса, валютного режима или пула стран автоматически пересчитывает цены",
+    "Клик по «Хар-ки»: правка характеристик того класса, что есть в XML (л.с., макс. скорость, вместимость, ширина захвата, требуемая мощность, производство здания)",
+    "Живой разбор цены в окне характеристик: база по ТТХ → коэф. страны → ретро → ₽-итог и дельта ещё до «Сохранить»",
+    "↺ «Из файла» — сброс ручных правок ТТХ с перечитыванием мода; при закрытии программы Ollama и все загруженные модели гасятся (настраивается)",
   ]},
   { v: "14.0", date: "2026-10-18", title: "World Edition (Tkinter)", items: [
     "Страны мира вместо трёх регионов, флаги и коэффициенты",
