@@ -293,7 +293,7 @@ input[type=range]:active::-webkit-slider-thumb { transform: scale(1.05); }
   grid-template-columns:
     26px minmax(104px, .95fr) minmax(160px, 1.5fr) minmax(96px, .8fr)
     minmax(112px, .95fr) 62px minmax(140px, 1.05fr) minmax(92px, .8fr)
-    minmax(92px, .8fr) minmax(120px, 1fr) minmax(104px, .85fr) minmax(120px, 1fr);
+    minmax(92px, .8fr) minmax(132px, 1.05fr) minmax(104px, .85fr) minmax(120px, 1fr);
 }
 .thead {
   position: sticky; top: 0; z-index: 3; min-height: 40px;
@@ -323,7 +323,8 @@ input[type=range]:active::-webkit-slider-thumb { transform: scale(1.05); }
 .trow.is-review { background: rgba(245, 158, 11, .07); }
 .trow.is-review:hover { background: rgba(245, 158, 11, .12); }
 .trow.is-retro { background: rgba(168, 85, 247, .06); }
-.trow.is-manual .c-new b { color: var(--cyan); }
+/* ручная цена подсвечивается чипом, а не сменой цвета цифры: цвет = валюта/итог, статус = плашка */
+.trow.is-manual .c-new b { color: var(--green); }
 .c-mod, .c-name, .c-brand, .c-specs, .c-src { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .c-name b { font-weight: 600; }
 .c-mod { color: var(--muted); font-size: 11.5px; }
@@ -791,3 +792,48 @@ input[type=range]:active::-webkit-slider-thumb { transform: scale(1.05); }
 .bd-total b.down i { color: #fca5a5; }
 .bd-warn { margin-top: 8px; font-size: 11px; color: #fcd34d; line-height: 1.5; }
 @keyframes bdIn { from { opacity: 0; transform: translateY(-3px); } to { opacity: 1; transform: none; } }
+
+/* ── v16: своя цена — статус читается по чипу, а не по цвету цифры ── */
+.c-new { display: flex; flex-direction: column; align-items: flex-end; gap: 1px; }
+.c-new .price-btn { display: inline-flex; align-items: baseline; gap: 1px; }
+.price-btn:hover b { text-decoration: underline dotted rgba(34, 197, 94, .55); text-underline-offset: 3px; }
+.p-tools { display: flex; align-items: center; gap: 4px; max-width: 100%; overflow: hidden; }
+.p-chip { min-width: 0; flex: 0 1 auto; }
+.p-tool { flex: 0 0 auto; }
+.p-chip {
+  font-size: 9.5px; line-height: 1.55; padding: 0 6px; border-radius: 999px; white-space: nowrap;
+  color: #fcd34d; background: rgba(245, 158, 11, .12); border: 1px solid rgba(245, 158, 11, .34);
+  max-width: 112px; overflow: hidden; text-overflow: ellipsis; animation: chipIn .26s var(--spring) both;
+}
+.p-chip.is-motor { color: #c7d2fe; background: rgba(99, 102, 241, .12); border-color: rgba(99, 102, 241, .36); }
+@keyframes chipIn { from { opacity: 0; transform: translateY(-3px) scale(.92); } to { opacity: 1; transform: none; } }
+.p-tool {
+  background: transparent; border: 1px solid var(--line); color: var(--muted); cursor: pointer;
+  font-size: 9.5px; line-height: 1.5; border-radius: 999px; padding: 0 6px;
+  transition: color .16s, border-color .16s, background .16s, transform .22s var(--spring);
+}
+.p-tool:hover { color: var(--text); border-color: var(--indigo); background: rgba(99, 102, 241, .18); }
+.p-reset:hover { color: #fcd34d; border-color: var(--amber); background: rgba(245, 158, 11, .14); transform: rotate(-150deg); }
+.trow.price-flash .c-new b { animation: priceFlash .78s var(--ease) both; }
+@keyframes priceFlash {
+  0% { text-shadow: 0 0 0 rgba(34, 197, 94, 0); }
+  35% { text-shadow: 0 0 16px rgba(34, 197, 94, .75); }
+  100% { text-shadow: 0 0 0 rgba(34, 197, 94, 0); }
+}
+/* поповер ввода цены */
+.pp-row { display: flex; align-items: center; gap: 8px; padding: 2px 4px 6px; }
+.pp-row input {
+  flex: 1; min-width: 0; font-size: 17px; font-weight: 700; text-align: right; padding: 8px 10px;
+  font-variant-numeric: tabular-nums; border-radius: var(--r-sm); border: 1px solid var(--line);
+  background: var(--input); color: var(--text); transition: border-color .18s, box-shadow .18s;
+}
+.pp-row input:focus { outline: none; border-color: var(--indigo); box-shadow: 0 0 0 3px rgba(99, 102, 241, .18); }
+.pp-unit { color: var(--muted); font-size: 13px; font-weight: 650; }
+.pp-hint { font-size: 11px; color: var(--muted); padding: 0 4px 8px; min-height: 15px; transition: color .18s; }
+.pp-hint.is-ok { color: var(--emerald); }
+.pp-hint.is-bad { color: var(--amber); }
+.pp-btns { display: flex; gap: 6px; padding: 0 4px 6px; }
+.pp-btns .btn { flex: 1 1 0; justify-content: center; padding: 7px 6px; font-size: 11.5px; }
+.pp-note { font-size: 10.5px; color: var(--dim); line-height: 1.5; padding: 7px 4px 2px; border-top: 1px solid var(--line); }
+.linkish { background: none; border: 0; color: var(--muted); font: inherit; cursor: pointer; padding: 0; text-decoration: underline dotted; }
+.linkish:hover { color: var(--text); }

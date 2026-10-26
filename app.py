@@ -212,11 +212,14 @@ class Api:
     def set_retro(self, key: str, is_retro) -> dict:
         return self._svc.set_retro(str(key), bool(is_retro))
 
-    def set_price(self, key: str, price) -> dict:
+    def set_price(self, key: str, price, source="manual") -> dict:
         try:
-            return self._svc.set_price(str(key), int(float(price)))
+            return self._svc.set_price(str(key), price, str(source))
         except (TypeError, ValueError) as e:
             return {"ok": False, "error": f"Цена: {e}"}
+
+    def clear_price(self, key) -> dict:
+        return self._svc.clear_price(str(key))
 
     def set_motor(self, key: str, idx, hp, delta) -> dict:
         try:
@@ -322,7 +325,7 @@ class Api:
 
     def ai_catalog(self) -> dict:
         from core.ai import model_catalog
-        d = dict(model_catalog())
+        d = dict(model_catalog(self._svc.cfg.ui_lang))
         d["current"] = self._svc.cfg.ai_model_name
         d["use_ai"] = bool(self._svc.cfg.use_local_ai)
         return d

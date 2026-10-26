@@ -597,14 +597,27 @@ function renderTable() {
 }
 
 function priceCell(it) {
-  const hasMotors = it.item_type === "vehicle" && it.motor_prices && it.motor_prices.length > 1;
-  const manual = it.manual_price != null;
+  const motors = (it.item_type === "vehicle" && it.motor_prices) ? it.motor_prices : [];
+  const hasMotors = motors.length > 1;
+  const src = it.price_source || "";
   const cfg = (S.boot && S.boot.config) || {};
   const suffix = cfg.write_direct_rubles === false ? " €" : " ₽";
-  return `<div class="c-new">
-      <button class="price-btn" data-price="${esc(it.unique_key)}" title="${hasMotors ? "Выбрать комплектацию" : "Задать цену вручную"}">
-        <b>${fmt(it.new_price)}</b><span class="cur">${suffix}</span>${hasMotors ? ' <span class="dim">▾</span>' : ""}${manual ? ' <span title="вручную">✎</span>' : ""}
-      </button></div>`;
+  const chosen = motors.find(m => m.total === it.manual_price);
+  const chip = src === "motor"
+    ? `<span class="p-chip is-motor" title="Цена не ручная — выбрана комплектация. ↺ рядом вернёт базовую">⚙ ${esc((chosen && chosen.label) || "комплектация")}</span>`
+    : (src === "manual"
+       ? '<span class="p-chip" title="Цену задал ты. «Обновить цены» и коэффициенты её не трогают">✎ вручную</span>'
+       : "");
+  const cfgs = hasMotors
+    ? `<button class="p-tool" data-configs="${esc(it.unique_key)}" title="Комплектации двигателя (${motors.length})">▾ ${motors.length}</button>`
+    : "";
+  const reset = src
+    ? `<button class="p-tool p-reset" data-auto="${esc(it.unique_key)}" title="Вернуть авторасчёт">↺</button>`
+    : "";
+  return `<div class="c-new${src ? " has-src" : ""}">
+      <button class="price-btn" data-price="${esc(it.unique_key)}" title="Клик — задать свою цену">
+        <b>${fmt(it.new_price)}</b><span class="cur">${suffix}</span></button>
+      <span class="p-tools">${chip}${cfgs}${reset}</span></div>`;
 }
 
 function rowEl(it) {
@@ -645,7 +658,11 @@ $("#tbody").addEventListener("click", e => {
   const sw = e.target.closest("[data-retro]");
   if (sw) { toggleRetro(sw.dataset.retro, !sw.classList.contains("is-on")); return; }
   const pb = e.target.closest("[data-price]");
-  if (pb) { openPriceMenu(pb.dataset.price, pb); return; }
+  if (pb) { openPriceEditor(pb.dataset.price, pb); return; }
+  const cb = e.target.closest("[data-configs]");
+  if (cb) { openPriceMenu(cb.dataset.configs, cb); return; }
+  const rb = e.target.closest("[data-auto]");
+  if (rb) { resetAutoPrice(rb.dataset.auto); return; }
   const sp = e.target.closest("[data-specs]");
   if (sp) { openTtx(sp.dataset.specs); return; }
   const cc = e.target.closest("[data-country]");
@@ -675,12 +692,13 @@ async function setCountry(key, country) {
   toast("ok", `${r.item.title} → ${r.item.country} (коэф. ${fmt2(r.item.country_mult)})`);
 }
 
-function patchRow(it) {
+function patchRow(it, flash) {
   const tr = $(`.trow[data-key="${CSS.escape(it.unique_key)}"]`);
   if (!tr || !matches(it)) { renderTable(); return; }
   const fresh = rowEl(it);
-  tr.className = fresh.className;
+  tr.className = fresh.className + (flash ? " price-flash" : "");
   tr.innerHTML = fresh.innerHTML;
+  if (flash) setTimeout(() => tr.classList.remove("price-flash"), 760);
 }
 
 /* ── выбор страны (анимированный поповер) ── */
@@ -710,13 +728,14 @@ function openCountryPicker(key, anchor) {
   setTimeout(() => inp.focus(), 30);
 }
 
-function positionPop(pop, anchor) {
+function positionPop(pop, anchor, width) {
   const r = anchor.getBoundingClientRect();
-  const w = 240, h = Math.min(320, pop.scrollHeight || 320);
+  const w = Math.min(Math.max(Number(width) || 240, 180), 420);
+  const h = Math.min(420, pop.scrollHeight || 320);
   let top = r.bottom + 6;
   if (top + h > innerHeight - 8) top = Math.max(8, r.top - h - 6);
   pop.style.top = top + "px";
-  pop.style.left = Math.min(Math.max(8, r.left), innerWidth - w - 8) + "px";
+  pop.style.left = Math.min(Math.max(8, r.left - 60), innerWidth - w - 8) + "px";
   pop.style.width = w + "px";
 }
 function closePop() { $("#pop").hidden = true; popKey = null; }
@@ -726,25 +745,29 @@ document.addEventListener("click", e => {
   if (e.target.closest("#pop") || e.target.closest("[data-country]")) return;
   closePop();
 });
-window.addEventListener("resize", closePop);
-window.addEventListener("scroll", closePop, true);
+window.addEventListener("resize", () => { closePop(); closeMenu(); closePriceEditor(); });
+window.addEventListener("scroll", () => { closePop(); closeMenu(); closePriceEditor(); }, true);
 
 /* ── меню комплектаций (клик по цене) ── */
 let menuKey = null;
+let menuAnchor = null;
 async function openPriceMenu(key, anchor) {
   const it = S.items.get(key);
   if (!it) return;
   closeMenu();
   menuKey = key;
+  menuAnchor = anchor;
   const menu = $("#motorPop");
-  let html = `<div class="ctx-h">${it.type_icon} ${esc(it.title)} — базовая ${fmt(it.new_price)}</div>`;
-  if (it.item_type === "vehicle" && it.motor_prices && it.motor_prices.length) {
+  let html = `<div class="ctx-h">${it.type_icon} ${esc(it.title)} — комплектации</div>`;
+  if (it.motor_prices && it.motor_prices.length) {
     html += it.motor_prices.map(m =>
-      `<div class="ctx-i" data-motor="${m.index}"><span>${esc(m.label)} · ${fmt(m.hp)} л.с.</span><b>${fmt(m.total)}</b></div>`
+      `<div class="ctx-i${m.total === it.manual_price ? " is-on" : ""}" data-motor="${m.index}">
+         <span>${esc(m.label)} · ${fmt(m.hp)} л.с.</span><b>${fmt(m.total)}</b></div>`
     ).join("");
     html += `<div class="ctx-sep"></div>`;
   }
-  html += `<div class="ctx-i" data-edit="1"><span>✎ Своя цена / правка ТТХ</span></div>`;
+  html += `<div class="ctx-i" data-price-item="1"><span>✎ Задать свою цену</span></div>
+           <div class="ctx-i" data-edit="1"><span>⚙ Править ТТХ и разбор цены</span></div>`;
   menu.innerHTML = html;
   menu.hidden = false;
   positionPop(menu, anchor);
@@ -756,21 +779,106 @@ async function openPriceMenu(key, anchor) {
   });
   const ed = $("#motorPop [data-edit]");
   if (ed) ed.onclick = () => { closeMenu(); openTtx(key); };
+  const pe = $("#motorPop [data-price-item]");
+  if (pe) pe.onclick = () => { closeMenu(); openPriceEditor(key, menuAnchor || pe); };
+}
+
+/* ── своя цена: поповер с вводом, дельтой к авторасчёту и возвратом ↺ ── */
+let ppKey = null;
+let ppAuto = null;
+
+function closePriceEditor() { const p = $("#pricePop"); if (p) p.hidden = true; ppKey = null; ppAuto = null; }
+
+async function openPriceEditor(key, anchor) {
+  const it = S.items.get(key);
+  if (!it) return;
+  closePriceEditor();
+  closeMenu();
+  ppKey = key;
+  const cfg = (S.boot && S.boot.config) || {};
+  const unit = cfg.write_direct_rubles === false ? "€" : "₽";
+  const pop = $("#pricePop");
+  pop.innerHTML = `
+    <div class="ctx-h">${it.type_icon} ${esc(it.title)} — конечная цена</div>
+    <div class="pp-row"><input type="number" id="ppInput" min="50" max="1000000000" step="100"
+      value="${it.new_price}" /><span class="pp-unit">${unit}</span></div>
+    <div class="pp-hint" id="ppHint">считаю авторасчёт…</div>
+    <div class="pp-btns">
+      <button class="btn btn-good sm" id="ppOk">✓ Сохранить</button>
+      <button class="btn btn-ghost sm" id="ppReset" ${it.price_source ? "" : "disabled"}>↺ Авторасчёт</button>
+      <button class="btn btn-ghost sm" id="ppNo">Отмена</button>
+    </div>
+    <div class="pp-note">Enter — сохранить, Esc — отмена. Своя цена не зависит от коэффициентов страны и ретро: в файл мода ляжет ровно это число.</div>`;
+  pop.hidden = false;
+  positionPop(pop, anchor, 292);
+  const inp = $("#ppInput"), hint = $("#ppHint"), ok = $("#ppOk");
+  const autoP = () => (ppAuto ? Number(ppAuto.auto_price) : Number(it.new_price));
+  function draw() {
+    const v = Number(inp.value);
+    const bad = !isFinite(v) || v < 50;
+    ok.disabled = bad;
+    hint.className = "pp-hint " + (bad ? "is-bad" : "is-ok");
+    if (bad) { hint.textContent = "Нужно целое число от 50"; return; }
+    const a = autoP(), d = v - a;
+    let txt = "Авторасчёт " + fmt(a) + " " + unit;
+    if (d) {
+      const pct = a > 0 ? Math.round(Math.abs(d) / a * 100) : 0;
+      txt += " · " + (d > 0 ? "+" : "−") + fmt(Math.abs(d)) + " (" + pct + "%)";
+    } else txt += " · совпадает";
+    if (unit === "€") txt += " · ≈ " + fmt(Math.round(v * (Number(cfg.exchange_rate) || 0))) + " ₽";
+    hint.textContent = txt;
+  }
+  inp.oninput = draw;
+  inp.onkeydown = e => {
+    if (e.key === "Enter") { e.preventDefault(); saveManualPrice(); }
+    else if (e.key === "Escape") { e.preventDefault(); closePriceEditor(); }
+  };
+  ok.onclick = saveManualPrice;
+  $("#ppReset").onclick = () => resetAutoPrice(key);
+  $("#ppNo").onclick = closePriceEditor;
+  draw();
+  setTimeout(() => { inp.focus(); inp.select(); }, 30);
+  const r = await call("breakdown", key);
+  if (r && r.ok && ppKey === key) { ppAuto = r.breakdown; draw(); }
+}
+
+async function saveManualPrice() {
+  if (!ppKey) return;
+  const key = ppKey;
+  const v = Number($("#ppInput").value);
+  if (!isFinite(v) || v < 50) return toast("err", "Цена должна быть числом от 50");
+  const r = await call("set_price", key, Math.round(v), "manual");
+  if (!r || !r.ok) return toast("err", (r && r.error) || "Не удалось сохранить цену");
+  S.items.set(key, r.item);
+  patchRow(r.item, true);
+  updateStats();
+  closePriceEditor();
+  toast("ok", "Своя цена " + fmt(r.item.new_price) + " · ↺ в строке вернёт авторасчёт");
+}
+
+async function resetAutoPrice(key) {
+  const r = await call("clear_price", key);
+  if (!r || !r.ok) return toast("err", (r && r.error) || "Не удалось вернуть авторасчёт");
+  S.items.set(key, r.item);
+  patchRow(r.item, true);
+  updateStats();
+  closePriceEditor();
+  toast("ok", "Авторасчёт возвращён: " + fmt(r.item.new_price));
 }
 function closeMenu() { $("#motorPop").hidden = true; menuKey = null; }
 document.addEventListener("click", e => {
-  if (!menuKey) return;
-  if (e.target.closest("#motorPop") || e.target.closest("[data-price]")) return;
-  closeMenu();
+  if (menuKey && !e.target.closest("#motorPop") && !e.target.closest("[data-configs]")
+      && !e.target.closest("[data-price]")) closeMenu();
+  if (ppKey && !e.target.closest("#pricePop") && !e.target.closest("[data-price]")) closePriceEditor();
 });
 
-function applyMotorPrice(key, m) {
-  const it = S.items.get(key);
-  it.manual_price = m.total;
-  it.new_price = m.total;
-  toast("info", `Выбрана комплектация «${m.label}»: ${fmt(m.total)} (${fmt(m.hp)} л.с.)`);
-  patchRow(it);
-  call("set_price", key, m.total);
+async function applyMotorPrice(key, m) {
+  const r = await call("set_price", key, m.total, "motor");
+  if (!r || !r.ok) return toast("err", (r && r.error) || "Не удалось выбрать комплектацию");
+  S.items.set(key, r.item);
+  patchRow(r.item, true);
+  updateStats();
+  toast("ok", `Комплектация «${m.label}» · ${fmt(r.item.new_price)} (${fmt(m.hp)} л.с.)`);
 }
 
 /* ── модалка ТТХ: поля только того класса, что есть в XML + разбор цены ── */
@@ -828,10 +936,12 @@ function motorsForm(it) {
 }
 
 function priceRow(it) {
+  const now = it.price_source === "motor" ? "выбрана комплектация"
+    : (it.manual_price != null ? "задана вручную" : "авторасчёт");
   return `<div class="mrow">
-      <label>Своя цена (${it.item_type === "vehicle" ? "базовая" : ""})</label>
+      <label title="Сейчас: ${now}">Своя цена · ${now}</label>
       <input type="number" id="mPrice" min="50" step="100" value="${it.manual_price != null ? it.manual_price : 0}">
-      <span class="dim">0 = авторасчёт</span></div>`;
+      <span class="dim"><button class="linkish" id="mPriceAuto" type="button">↺ 0 = авторасчёт</button></span></div>`;
 }
 
 function fieldForm(it) {
@@ -845,7 +955,7 @@ function fieldForm(it) {
         <span class="unit">км · -1 = неизвестно</span></div>
     </div>
     <div class="mrow">
-      <label>Своя цена</label>
+      <label>Своя цена · ${it.price_source === "manual" ? "задана вручную" : "авторасчёт"}</label>
       <input type="number" id="mPrice" min="50" step="100" value="${it.manual_price != null ? it.manual_price : 0}">
       <span class="dim">0 = авторасчёт</span></div>
     <div class="dim sm">Координаты поля: ${it.field_coord ? it.field_coord.map(n => Math.round(n)).join(" / ") : "не найдены"}</div>`;
@@ -873,6 +983,14 @@ function openTtx(key) {
     el.addEventListener("input", () => schedulePreview());
     el.addEventListener("change", () => schedulePreview());
   });
+  const pa = $("#mPriceAuto");
+  if (pa) pa.onclick = () => {
+    const i = $("#mPrice");
+    if (!i) return;
+    i.value = 0;
+    i.focus();
+    toast("info", "0 = цена, которую считает программа. Нажми «Сохранить», чтобы снять ручную цену.");
+  };
   schedulePreview(0);
 }
 
@@ -952,8 +1070,11 @@ $("#modalSave").onclick = async () => {
     if (!r || !r.ok) return toast("err", (r && r.error) || "Ошибка сохранения поля");
     S.items.set(key, r.item);
     if (price > 0) {
-      const r2 = await call("set_price", key, price);
+      const r2 = await call("set_price", key, price, "manual");
       if (r2 && r2.ok) S.items.set(key, r2.item);
+    } else if (r.item.manual_price != null) {
+      const r3 = await call("clear_price", key);
+      if (r3 && r3.ok) S.items.set(key, r3.item);
     }
     patchRow(S.items.get(key));
     updateStats();
@@ -973,10 +1094,14 @@ $("#modalSave").onclick = async () => {
   }
 
   if (price > 0) {
-    const r = await call("set_price", key, price);
+    const r = await call("set_price", key, price, "manual");
     if (!r || !r.ok) return toast("err", (r && r.error) || "Ошибка цены");
     S.items.set(key, r.item);
   } else {
+    if (S.items.get(key).manual_price != null) {
+      const rc = await call("clear_price", key);
+      if (rc && rc.ok) S.items.set(key, rc.item);
+    }
     for (const el of $$("#modalBody [data-mhp]")) {
       const i = Number(el.dataset.mhp);
       const hpEl = $("#modalBody [data-mhp=\"" + i + "\"]");
@@ -1474,8 +1599,8 @@ const TOUR = [
     text: "Двойной клик по стране в строке — анимированный список стран. Выбор запоминается для бренда и сразу пересчитывает цену." },
   { sel: ".thead .c-retro", title: "Ретро-тумблер",
     text: "Переключатель в строке делает технику ретро: цена умножается на коэффициент ретро, а dailyUpkeep — на коэффициент износа." },
-  { sel: ".thead .c-new", title: "Комплектации",
-    text: "Клик по цене откроет список комплектаций двигателя с разными л.с. и ценами; «Своя цена» — ручной ввод." },
+  { sel: ".thead .c-new", title: "Своя цена и комплектации",
+    text: "Клик по самой цифре цены — маленький редактор: вписываешь число, видишь дельту к авторасчёту и жмёшь Enter. Рядом появляется чип «✎ вручную» и кнопка ↺ — одно нажатие возвращает цену, которую считает программа. Стрелка «▾ N» на технике открывает комплектации двигателя: выбор комплектации помечается как «⚙ название», а не как ручная цена, и тоже снимается кнопкой ↺." },
   { sel: ".thead .c-specs", title: "Правка характеристик",
     text: "Клик (или двойной клик) по колонке «Хар-ки» открывает редактор: показаны только те характеристики, которые реально есть в XML этой позиции — л.с. и макс. скорость у техники, вместимость, места и производство у здания, площадь и дистанция у поля. Справа внизу живой разбор: база → коэффициент страны → ретро → итог в ₽, и дельта видна ещё до сохранения." },
   { sel: '[data-view="fields"]', title: "Поля и расстояние",

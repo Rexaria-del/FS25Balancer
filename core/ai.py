@@ -5,11 +5,14 @@ import json, os, re, shutil, subprocess, tempfile, time, urllib.request
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from core.countries import ALL_COUNTRIES, country_info
+from core.i18n import country_name, norm_lang, t
 from core.models import BalancerConfig
 
 OLLAMA_HOST = "http://localhost:11434"
 
 AI_BRAND_CACHE: Dict[str, str] = {}
+# Читер-вердикты ИИ: ключ позиции -> (is_cheat, краткая причина)
+AI_CHEAT_HINTS: Dict[str, tuple] = {}
 
 DEFAULT_AI_PROMPT = (
     "Ты — эксперт по классификации модов Farming Simulator 25.\n"
@@ -27,11 +30,40 @@ DEFAULT_AI_PROMPT = (
     "2. РЕТРО = техника до 1991 года выпуска, советские/постсоветские модели "
     "(Т-40, ДТ-75, К-700, ЗИЛ, ГАЗ-53, МТЗ-50/80, УАЗ-469, КРАЗ, Дон-1500), "
     "а также vintage/classic-реплики. Иначе — MODERN.\n"
-    "3. СССР выбирай только для техники советского периода.\n\n"
+    "3. СССР выбирай только для техники советского периода.\n"
+    "4. ОЦЕНИ АДЕКВАТНОСТЬ ТТХ. CHEAT — если характеристики явно за гранью для "
+    "этого класса (например 3000 л.с. у трактора, 150 км/ч у комбайна, 40 м захвата "
+    "у плуга, завод на 50 циклов в час, цена в разы ниже разумной). Иначе — CLEAN.\n\n"
     "ФОРМАТ ОТВЕТА — ровно одна строка, без пояснений:\n"
-    "СТРАНА|RETRO  или  СТРАНА|MODERN\n"
-    "Примеры: Россия|RETRO   Германия|MODERN   СССР|RETRO\n"
+    "СТРАНА|RETRO|CLEAN  или  СТРАНА|MODERN|CHEAT|краткая причина\n"
+    "Примеры: Россия|RETRO|CLEAN   Германия|MODERN|CHEAT|3000 л.с. у трактора\n"
+    "Если сомневаешься в стране — всё равно выбери одну из списка.\n"
     "Ответ:"
+)
+
+DEFAULT_AI_PROMPT_EN = (
+    "You are an expert at classifying Farming Simulator 25 mods.\n"
+    "Determine the COUNTRY OF ORIGIN, the RETRO status and whether the specs are cheaty.\n\n"
+    "Mod data:\n"
+    "  Mod: {mod_name}\n"
+    "  File: {filename}\n"
+    "  Brand: {brand}\n"
+    "  Title: {title}\n\n"
+    "ALLOWED COUNTRIES (pick exactly one, copy the name character by character):\n{countries}\n\n"
+    "RULES:\n"
+    "1. Use only the list above. If the maker is missing, pick the closest market country.\n"
+    "2. RETRO = models built before 1991, Soviet/post-Soviet machines "
+    "(T-40, DT-75, K-700, ZIL, GAZ-53, MTZ-50/80, UAZ-469, KRAZ, Don-1500) "
+    "and vintage/classic replicas. Otherwise MODERN.\n"
+    "3. Pick USSR only for Soviet-era machines.\n"
+    "4. SPECS SANITY. Return CHEAT when stats are absurd for this class "
+    "(e.g. 3000 hp tractor, 150 km/h harvester, 40 m plough, a plant at 50 cycles/hour, "
+    "a price far below a reasonable one). Otherwise CLEAN.\n\n"
+    "ANSWER FORMAT — exactly one line, no explanations:\n"
+    "COUNTRY|RETRO|CLEAN  or  COUNTRY|MODERN|CHEAT|short reason\n"
+    "Examples: Russia|RETRO|CLEAN   Germany|MODERN|CHEAT|3000 hp tractor\n"
+    "Even if unsure about the country, still pick one from the list.\n"
+    "Answer:"
 )
 
 
@@ -192,13 +224,23 @@ def install_ollama_app(status_cb: Callable[[str], None],
         done_cb(f"Ошибка скачивания: {e}")
 
 
+def ai_key(brand: str, title: str, filename: str, mod_name: str) -> str:
+    return "{0}_{1}_{2}_{3}".format(brand, title, filename, mod_name).lower()
+
+
+def ai_cheat_hint(brand: str, title: str, filename: str, mod_name: str) -> tuple:
+    """Сохранённый вердикт ИИ о «читерности» позиции: (is_cheat, note)."""
+    return AI_CHEAT_HINTS.get(ai_key(brand, title, filename, mod_name), (False, ""))
+
+
 def build_prompt(pro_data: Dict[str, Any], countries: List[str], brand: str,
-                 title: str, filename: str, mod_name: str) -> str:
-    tpl = (pro_data or {}).get("custom_prompt") or DEFAULT_AI_PROMPT
+                 title: str, filename: str, mod_name: str, lang: str = "ru") -> str:
+    default = DEFAULT_AI_PROMPT_EN if norm_lang(lang) == "en" else DEFAULT_AI_PROMPT
+    tpl = (pro_data or {}).get("custom_prompt") or default
     need = {"countries", "brand", "title", "filename", "mod_name"}
     available = {f for f in re.findall(r"\{(\w+)\}", tpl)}
     if not available or not need.issubset(available):
-        tpl = DEFAULT_AI_PROMPT
+        tpl = default
     return tpl.format(countries=", ".join(countries) if countries else "Любая страна",
                       brand=brand, title=title, filename=filename, mod_name=mod_name)
 
@@ -223,25 +265,28 @@ def ask_ai_classification(brand: str, title: str, filename: str, mod_name: str,
                           cfg: BalancerConfig, allowed: List[str]
                           ) -> Tuple[Optional[str], bool, str]:
     """Возвращает (страна, is_retro, причина)."""
-    key = f"{cfg.ai_model_name}_{brand}_{title}_{filename}_{mod_name}".lower()
+    lang = getattr(cfg, "ui_lang", "ru")
+    hkey = ai_key(brand, title, filename, mod_name)
+    key = (cfg.ai_model_name or "") + "|" + hkey
     if key in AI_BRAND_CACHE:
         parts = AI_BRAND_CACHE[key].split("|")
         country = parts[0] if parts else None
         is_retro = len(parts) > 1 and "RETRO" in parts[1].upper()
-        return country, is_retro, "Кэш ИИ"
+        return country, is_retro, t("src.ai_cache", lang)
 
     ok, models = check_ollama()
     if not ok:
-        return None, False, "Служба не запущена"
+        return None, False, t("hw.offline", lang)
     if not any(cfg.ai_model_name in m for m in models):
-        return None, False, f"Модель {cfg.ai_model_name} не найдена"
+        return None, False, "%s: %s" % (cfg.ai_model_name,
+                                        t("hw.nodisk", lang) if False else "not installed")
 
     from core.ai_state import get_pro_data
-    prompt = build_prompt(get_pro_data(), allowed, brand, title, filename, mod_name)
+    prompt = build_prompt(get_pro_data(), allowed, brand, title, filename, mod_name, lang)
 
     payload = json.dumps({
         "model": cfg.ai_model_name, "prompt": prompt, "stream": False,
-        "options": {"temperature": 0.0, "num_predict": 40},
+        "options": {"temperature": 0.0, "num_predict": 60},
     }).encode("utf-8")
 
     req = urllib.request.Request(f"{OLLAMA_HOST}/api/generate", data=payload,
@@ -249,13 +294,18 @@ def ask_ai_classification(brand: str, title: str, filename: str, mod_name: str,
     try:
         with urllib.request.urlopen(req, timeout=20.0) as resp:
             ans = json.loads(resp.read().decode("utf-8")).get("response", "").strip()
-        parts = ans.split("|")
+        parts = [p.strip() for p in ans.split("|")]
         is_retro = len(parts) > 1 and "RETRO" in parts[1].upper()
+        # 3-й токен — вердикт о неадекватных ТТХ (старые промпты его не отдают)
+        is_cheat = len(parts) > 2 and "CHEAT" in parts[2].upper()
+        note = parts[3].strip()[:120] if len(parts) > 3 else ""
+        AI_CHEAT_HINTS[hkey] = (is_cheat, note)
         country = _normalize_country(parts[0], allowed)
         if country:
-            AI_BRAND_CACHE[key] = f"{country}|{'RETRO' if is_retro else 'MODERN'}"
-            return country, is_retro, "ИИ-классификация"
-        return None, False, f"Вне пула: {ans[:40]}"
+            AI_BRAND_CACHE[key] = "{0}|{1}|{2}".format(
+                country, "RETRO" if is_retro else "MODERN", "CHEAT" if is_cheat else "CLEAN")
+            return country, is_retro, t("src.ai", lang)
+        return None, False, t("src.out_of_pool", lang, ans[:40])
     except Exception as e:
         return None, False, str(e)[:60]
 
@@ -266,8 +316,9 @@ def detect_country_and_retro(brand: str, title: str, filename: str, mod_name: st
     """(страна, флаг, коэф, ретро, need_review, причина). Только выбранный пул стран."""
     cb = (brand or "").strip().lower()
     allowed = [c for c in (cfg.selected_countries or []) if c in ALL_COUNTRIES]
+    lang = getattr(cfg, "ui_lang", "ru")
     if not allowed:
-        return "Неизвестно", "❓", 1.0, False, True, "Нет выбранных стран"
+        return ("Неизвестно", "❓", 1.0, False, True, t("src.no_pool", lang))
 
     combined = f"{brand} {title} {filename} {mod_name}".lower()
     tokens = set(re.findall(r"[a-z0-9]+", combined))
@@ -279,7 +330,8 @@ def detect_country_and_retro(brand: str, title: str, filename: str, mod_name: st
             # Ретро берём из самой позиции, а не из памяти бренда:
             # у одной марки выпускаются и ретро, и современные модели.
             is_retro = check_retro_keywords(combined)
-            return country, info["flag"], cfg.multiplier_for(country), is_retro, False, "Память"
+            return (country, info["flag"], cfg.multiplier_for(country), is_retro, False,
+                    t("src.memory", lang))
 
     from core.ai_state import get_pro_data
     pro = get_pro_data()
@@ -291,7 +343,8 @@ def detect_country_and_retro(brand: str, title: str, filename: str, mod_name: st
         if tokens & set(brands_list) or any(b in combined for b in brands_list):
             info = country_info(country)
             is_retro = check_retro_keywords(combined)
-            return country, info["flag"], cfg.multiplier_for(country), is_retro, False, f"Бренд ({country})"
+            return (country, info["flag"], cfg.multiplier_for(country), is_retro, False,
+                    t("src.brand_in", lang, country_name(country, info.get("iso2", ""), lang)))
 
     kw_retro = check_retro_keywords(combined)
     if cfg.use_local_ai:
@@ -302,11 +355,11 @@ def detect_country_and_retro(brand: str, title: str, filename: str, mod_name: st
             return (country, info["flag"], cfg.multiplier_for(country),
                     bool(is_retro or kw_retro), False, reason)
         return ("⚠️ Проверить", "❓", cfg.multiplier_for(allowed[0]),
-                kw_retro, True, f"ИИ: {reason}")
+                kw_retro, True, t("src.ai_prefix", lang, reason))
 
     info = country_info(allowed[0])
     return (allowed[0], info["flag"], cfg.multiplier_for(allowed[0]),
-            kw_retro, True, "По умолчанию")
+            kw_retro, True, t("src.default", lang))
 
 
 RETRO_KEYWORDS = [
@@ -325,19 +378,44 @@ def check_retro_keywords(text: str) -> bool:
     return any(kw in t for kw in RETRO_KEYWORDS)
 
 
+# desc — для русского интерфейса, desc_en — для английского
 MODEL_CATALOG = [
-    {"name": "qwen2.5:3b", "gb": 1.9, "desc": "лучшее понимание русского, оптимальный старт"},
-    {"name": "llama3.2:3b", "gb": 2.0, "desc": "быстрая и лёгкая, для слабых ПК"},
-    {"name": "gemma2:2b", "gb": 1.6, "desc": "компактная, для быстрого старта"},
-    {"name": "phi3:latest", "gb": 3.8, "desc": "надёжная классификация, средний вес"},
-    {"name": "mistral:latest", "gb": 6.1, "desc": "эталонная стабильность, требует ресурсов"},
-    {"name": "gemma3:4b", "gb": 3.8, "desc": "новое поколение Google, хорошая русская речь"},
-    {"name": "qwen2.5:7b", "gb": 4.7, "desc": "максимальная точность на русском"},
-    {"name": "llama3.1:8b", "gb": 4.9, "desc": "флагман Meta для сложных спорных случаев"},
-    {"name": "deepseek-r1:1.5b", "gb": 1.1, "desc": "с reasoning, но русским слабее"},
-    {"name": "llama3.2:1b", "gb": 0.9, "desc": "самая быстрая из «умных», черновой вариант"},
-    {"name": "tinyllama:1.1b", "gb": 0.6, "desc": "сверхлёгкий минимум точности"},
-    {"name": "phi3.5:latest", "gb": 3.8, "desc": "улучшенная phi3, многоязычная"},
+    {"name": "qwen2.5:3b", "gb": 1.9,
+     "desc": "лучшее понимание русского, оптимальный старт",
+     "desc_en": "best Russian understanding, ideal starting point"},
+    {"name": "llama3.2:3b", "gb": 2.0,
+     "desc": "быстрая и лёгкая, для слабых ПК",
+     "desc_en": "fast and light, good for weak PCs"},
+    {"name": "gemma2:2b", "gb": 1.6,
+     "desc": "компактная, для быстрого старта",
+     "desc_en": "compact, quickest to download"},
+    {"name": "phi3:latest", "gb": 3.8,
+     "desc": "надёжная классификация, средний вес",
+     "desc_en": "reliable classification, medium size"},
+    {"name": "mistral:latest", "gb": 6.1,
+     "desc": "эталонная стабильность, требует ресурсов",
+     "desc_en": "reference stability, needs resources"},
+    {"name": "gemma3:4b", "gb": 3.8,
+     "desc": "новое поколение Google, хорошая русская речь",
+     "desc_en": "new Google generation, good Russian"},
+    {"name": "qwen2.5:7b", "gb": 4.7,
+     "desc": "максимальная точность на русском",
+     "desc_en": "top accuracy in Russian"},
+    {"name": "llama3.1:8b", "gb": 4.9,
+     "desc": "флагман Meta для сложных спорных случаев",
+     "desc_en": "Meta flagship for hard edge cases"},
+    {"name": "deepseek-r1:1.5b", "gb": 1.1,
+     "desc": "с reasoning, но русским слабее",
+     "desc_en": "reasoning model, weaker in Russian"},
+    {"name": "llama3.2:1b", "gb": 0.9,
+     "desc": "самая быстрая из «умных», черновой вариант",
+     "desc_en": "fastest smart option, draft quality"},
+    {"name": "tinyllama:1.1b", "gb": 0.6,
+     "desc": "сверхлёгкий минимум точности",
+     "desc_en": "ultra light, minimum accuracy"},
+    {"name": "phi3.5:latest", "gb": 3.8,
+     "desc": "улучшенная phi3, многоязычная",
+     "desc_en": "improved phi3, multilingual"},
 ]
 
 
@@ -410,8 +488,10 @@ def hardware_info(force: bool = False) -> Dict[str, Any]:
     return hw
 
 
-def recommend_model(hw: Optional[Dict[str, Any]] = None) -> Tuple[str, str, Dict[str, Any]]:
+def recommend_model(hw: Optional[Dict[str, Any]] = None,
+                    lang: str = "ru") -> Tuple[str, str, Dict[str, Any]]:
     """(имя, причина, hw) — крупнейшая модель, влезающая в память с запасом."""
+    lang = norm_lang(lang)
     hw = hw or hardware_info()
     budget = max(1.0, hw["ram_gb"] - 3.0)
     if hw["gpu_gb"] >= 3:
@@ -419,8 +499,9 @@ def recommend_model(hw: Optional[Dict[str, Any]] = None) -> Tuple[str, str, Dict
     feas = [m for m in MODEL_CATALOG if m["gb"] * 1.2 + 1.0 <= budget]
     best = (max(feas, key=lambda m: (MODEL_RANKS.get(m["name"], 0), m["gb"]))
             if feas else min(MODEL_CATALOG, key=lambda m: m["gb"]))
-    reason = (f"ОЗУ {hw['ram_gb']:.0f} ГБ" +
-              (f", {hw['gpu_name']} ({hw['gpu_gb']:.0f} ГБ VRAM)" if hw["gpu_gb"] >= 3 else ", дискретной GPU нет — расчёт на ОЗУ"))
+    reason = t("hw.ram", lang, "{0:.0f}".format(hw["ram_gb"])) + (
+        t("hw.gpu", lang, hw["gpu_name"], "{0:.0f}".format(hw["gpu_gb"]))
+        if hw["gpu_gb"] >= 3 else t("hw.nogpu", lang))
     return best["name"], reason, hw
 
 
@@ -438,12 +519,15 @@ def ollama_ps() -> List[Dict[str, Any]]:
         return []
 
 
-def model_catalog() -> Dict[str, Any]:
+def model_catalog(lang: str = "ru") -> Dict[str, Any]:
+    lang = norm_lang(lang)
     ok, models = check_ollama()
     if not models:
         models = installed_models_disk()
-    rec, reason, hw = recommend_model()
-    cat = [dict(m, size=f"{m['gb']:.1f} ГБ", rank=MODEL_RANKS.get(m["name"], 0))
+    rec, reason, hw = recommend_model(lang=lang)
+    gb = t("unit.gb", lang)
+    cat = [dict(m, size="{0:.1f} {1}".format(m["gb"], gb),
+                rank=MODEL_RANKS.get(m["name"], 0), lang=lang)
            for m in MODEL_CATALOG]
     return {"running": ok, "installed": models, "catalog": cat,
             "ollama_installed": bool(get_ollama_exe()),

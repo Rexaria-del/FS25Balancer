@@ -9,25 +9,55 @@
 import xml.etree.ElementTree as ET
 from typing import Any, Dict, List, Optional, Tuple
 
+from core.i18n import t as _t
+
 FUEL_FILL_TYPES = {"diesel", "def", "electriccharge", "pigfood", "chickenfeed"}
 
-# key -> метаданные поля для UI и валидации
+# key -> метаданные поля для UI и валидации.
+# label/unit — ключи i18n (см. core/i18n.py), подписи меняются вместе с языком.
 SPEC_FIELDS: Dict[str, Dict[str, Any]] = {
-    "hp": {"label": "Мощность двигателя", "unit": "л.с.", "min": 0, "max": 3000, "step": 1,
+    "hp": {"label": "hp", "unit": "hp", "min": 0, "max": 3000, "step": 1,
            "kinds": ("vehicle",), "readonly": False},
-    "max_speed": {"label": "Максимальная скорость", "unit": "км/ч", "min": 0, "max": 200, "step": 1,
+    "max_speed": {"label": "max_speed", "unit": "kmh", "min": 0, "max": 200, "step": 1,
                   "kinds": ("vehicle",), "readonly": False},
-    "capacity": {"label": "Вместимость", "unit": "л", "min": 0, "max": 500000, "step": 50,
+    "capacity": {"label": "capacity", "unit": "liter", "min": 0, "max": 500000, "step": 50,
                  "kinds": ("vehicle", "placeable"), "readonly": False},
-    "working_width": {"label": "Ширина захвата", "unit": "м", "min": 0, "max": 60, "step": 0.1,
+    "working_width": {"label": "working_width", "unit": "meter", "min": 0, "max": 60, "step": 0.1,
                       "kinds": ("vehicle",), "readonly": False},
-    "needed_hp": {"label": "Требуемая мощность", "unit": "л.с.", "min": 0, "max": 3000, "step": 1,
+    "needed_hp": {"label": "needed_hp", "unit": "hp", "min": 0, "max": 3000, "step": 1,
                   "kinds": ("vehicle",), "readonly": False},
-    "production_cost": {"label": "Стоимость производства", "unit": "в час", "min": 0, "max": 100000,
+    "production_cost": {"label": "production_cost", "unit": "rub_hour", "min": 0, "max": 100000,
                         "step": 10, "kinds": ("placeable",), "readonly": False},
-    "slots": {"label": "Места (слоты/стенды)", "unit": "шт", "min": 0, "max": 512, "step": 1,
+    "slots": {"label": "slots", "unit": "pcs", "min": 0, "max": 512, "step": 1,
               "kinds": ("placeable",), "readonly": True},
+    # ── производства и точки продажи (v16) ──
+    "prod_cycles": {"label": "prod_cycles", "unit": "cph", "min": 0, "max": 200, "step": 0.1,
+                    "kinds": ("placeable",), "readonly": False},
+    "prod_output": {"label": "prod_output", "unit": "percycle", "min": 0, "max": 5000000, "step": 50,
+                    "kinds": ("placeable",), "readonly": False},
+    "prod_input": {"label": "prod_input", "unit": "percycle", "min": 0, "max": 5000000, "step": 50,
+                   "kinds": ("placeable",), "readonly": False},
+    "prod_cost_month": {"label": "prod_cost_month", "unit": "rub_month", "min": 0, "max": 5000000,
+                        "step": 50, "kinds": ("placeable",), "readonly": False},
+    "storage_capacity": {"label": "storage_capacity", "unit": "liter", "min": 0, "max": 20000000,
+                         "step": 500, "kinds": ("placeable",), "readonly": False},
+    # goods_count в XML не записывается: это ручная поправка к автоподсчёту товаров
+    "goods_count": {"label": "goods_count", "unit": "pcs", "min": 0, "max": 512, "step": 1,
+                    "kinds": ("placeable",), "readonly": False, "meta_only": True},
 }
+
+EDITABLE_KEYS = ("hp", "max_speed", "capacity", "working_width", "needed_hp",
+                 "production_cost", "prod_cycles", "prod_output", "prod_input",
+                 "prod_cost_month", "storage_capacity", "goods_count")
+
+
+def field_label(key: str, lang: Optional[str] = "ru") -> str:
+    return _t("spec." + str(key), lang)
+
+
+def field_unit(key: str, lang: Optional[str] = "ru") -> str:
+    meta = SPEC_FIELDS.get(str(key)) or {}
+    return _t("unit." + str(meta.get("unit", "")), lang)
 
 
 def _num(v: Any) -> float:
@@ -184,31 +214,44 @@ def apply_patch(root: ET.Element, patch: Dict[str, Any], item_type: str) -> Tupl
     warns: List[str] = []
     if sd is None:
         return done, ["нет storeData — правки невозможны"]
-    for key in ("hp", "max_speed", "capacity", "working_width", "needed_hp", "production_cost"):
+    for key in EDITABLE_KEYS:
         if key not in (patch or {}):
             continue
         meta = SPEC_FIELDS[key]
         raw = _num(patch[key])
+        if meta.get("meta_only"):
+            continue          # goods_count: влияет только на расчёт, XML не правим
         val = min(float(meta["max"]), max(float(meta["min"]), raw))
         if val != raw:
-            warns.append("%s: значение ограничено диапазоном %s–%s" % (meta["label"], meta["min"], meta["max"]))
+            warns.append("%s: %s–%s" % (meta["label"], meta["min"], meta["max"]))
+        n = 0
         if key == "hp":
             _patch_hp(root, sd, val)
         elif key == "max_speed":
             _patch_speed(sd, val)
         elif key == "capacity":
             n = _patch_capacity(root, sd, val, item_type)
-            if n > 1:
-                warns.append("вместимость разделена поровну между %d ёмкостями" % n)
         elif key == "working_width":
             _set_child(sd, "workingWidth", val)
         elif key == "needed_hp":
             _set_child(sd, "neededPower", val)
         elif key == "production_cost":
             n = _patch_production(root, val)
-            if n > 1:
-                warns.append("стоимость разделена между %d производствами" % n)
+        elif key == "prod_cycles":
+            n = _patch_cycles(root, val)
+        elif key in ("prod_output", "prod_input"):
+            tag = "output" if key == "prod_output" else "input"
+            nodes = _prod_nodes(root)
+            each = val / max(1, len(nodes))
+            for pr in nodes:
+                n += _scale_attr(_line_children(pr, tag), "amount", each)
+        elif key == "prod_cost_month":
+            n = _patch_month_cost(root, val)
+        elif key == "storage_capacity":
+            n = _patch_storage_cap(root, val)
+        if n > 1 and key not in ("capacity", "production_cost"):
+            warns.append("%s: значение распределено на %d узлов" % (meta["label"], n))
         done.append(key)
     if "slots" in (patch or {}):
-        warns.append("слоты не меняются: их количество задаёт структура мода")
+        warns.append("slots")
     return done, warns

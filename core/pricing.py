@@ -48,6 +48,16 @@ PLACEABLE_SIZE_KEYWORDS = {
     "big": 1.5, "huge": 2.5, "tiny": 0.4, "mega": 3.5,
 }
 
+# ── Множители для зданий (v16) ──
+# Производительность линии: cyclesPerHour * выход за цикл (л/час).
+# Мягкая зависимость по корню, чтобы один «в 10 раз быстрее» не давал цену x10.
+PROD_THROUGHPUT_REF = 2000.0     # л/час — около этого линия считается «нормальной»
+PROD_MULT_MIN, PROD_MULT_MAX = 0.5, 3.0
+# Точка продажи: множитель по числу принимаемых типов продукции.
+GOODS_BASE, GOODS_STEP, GOODS_MULT_MIN, GOODS_MULT_MAX = 0.80, 0.05, 0.6, 2.5
+# Сколько «часовых» расходов закладываем в цену здания
+UPKEEP_IN_PRICE = 0.4
+
 FUEL_FILL_TYPES = {
     "diesel", "def", "adblue", "electriccharge", "methane", "air",
     "oil", "coolant", "unknown",
@@ -55,6 +65,12 @@ FUEL_FILL_TYPES = {
 
 FIELD_BASE_PRICE_PER_HA = 4800.0
 SHOP_PLACEABLE_HINTS = {"sellingspoint", "sellingpoint", "shop", "farm", "garage", "workshop"}
+
+
+def rub_from_xml(price_xml: float, cfg: BalancerConfig) -> int:
+    """Рубли из числа, которое ляжет в <price>: ₽ напрямую или €-база × курс."""
+    v = float(price_xml or 0)
+    return clean_round(v if cfg.write_direct_rubles else v * cfg.exchange_rate)
 
 
 def clean_round(val: float) -> int:
@@ -108,21 +124,114 @@ def calc_vehicle_price(cat: str, hp: float, spd: float, cap: float,
     return max(350.0, raw * bm * gs)
 
 
-def calc_placeable_price(category: str, title: str, filename: str,
-                         capacity: float, slots: int, prod_cost: float,
-                         k_place: float, gs: float) -> float:
-    cat_info = PLACEABLE_CATEGORIES.get(category.lower(), PLACEABLE_CATEGORIES["misc"])
+def throughput_multiplier(throughput: float) -> float:
+    """Мягкий множитель производительности линии: sqrt(факт / эталон), в коридоре 0.5..3."""
+    tp = max(0.0, float(throughput or 0.0))
+    if tp <= 0:
+        return 1.0
+    return min(PROD_MULT_MAX, max(PROD_MULT_MIN, math.sqrt(tp / PROD_THROUGHPUT_REF)))
+
+
+def goods_multiplier(count: int) -> float:
+    """Множитель точки продажи по числу принимаемых типов продукции."""
+    n = max(0, int(count or 0))
+    if n <= 0:
+        return 1.0
+    return min(GOODS_MULT_MAX, max(GOODS_MULT_MIN, GOODS_BASE + GOODS_STEP * n))
+
+
+def chain_step(label: str, detail: str, value: float = 0.0,
+               effect: str = "", running: float = 0.0) -> Dict[str, Any]:
+    """Один шаг разбора цены: что применили, к чему это привело."""
+    return {"label": label, "detail": detail, "value": round(float(value or 0.0), 4),
+            "effect": effect, "running": round(float(running or 0.0), 2)}
+
+
+def calc_placeable_price_ex(category: str, title: str, filename: str,
+                            capacity: float, slots: int, prod_cost: float,
+                            k_place: float, gs: float,
+                            prod_throughput: float = 0.0, goods_count: int = 0,
+                            storage_capacity: float = 0.0, lang: str = "ru") -> Tuple[float, List[Dict[str, Any]]]:
+    """Цена здания + честная цепочка разбора (видно пользователю всегда).
+
+    Вместимость наружных резервуаров и внутренних складов завода не суммируется дважды:
+    берётся максимум, чтобы «склад при заводе» не удваивал бонус.
+    """
+    from core.i18n import category_label as _cat_label, t as _t
+
+    cat_key = str(category or "misc").strip().lower()
+    cat_info = PLACEABLE_CATEGORIES.get(cat_key, PLACEABLE_CATEGORIES["misc"])
     base = float(cat_info["base"])
     cat_mult = float(cat_info["mult"])
 
-    _, size_mult = detect_placeable_size(title, filename)
+    size_lbl, size_mult = detect_placeable_size(title, filename)
+    eff_cap = max(float(capacity or 0.0), float(storage_capacity or 0.0))
 
-    cap_bonus = math.log2(max(1.0, capacity / 1000)) * 2500 if capacity > 0 else 0.0
-    slot_bonus = slots * 800
-    prod_bonus = prod_cost * 0.4
+    cap_bonus = math.log2(max(1.0, eff_cap / 1000)) * 2500 if eff_cap > 0 else 0.0
+    slot_bonus = max(0, int(slots or 0)) * 800
+    prod_bonus = max(0.0, float(prod_cost or 0.0)) * UPKEEP_IN_PRICE
+    thr_mult = throughput_multiplier(prod_throughput)
+    goods_mult = goods_multiplier(goods_count)
 
-    raw = (base + cap_bonus + slot_bonus + prod_bonus) * cat_mult * size_mult * k_place * gs
-    return max(200.0, raw)
+    sum_part = base + cap_bonus + slot_bonus + prod_bonus
+    running = sum_part
+    steps: List[Dict[str, Any]] = [
+        chain_step(_t("bd.base", lang),
+                   "%s · %s" % (_cat_label(cat_key, lang, cat_key), "{0:,.0f}".format(base)),
+                   base, "+base", running),
+    ]
+    if cap_bonus > 0:
+        running += cap_bonus
+        steps.append(chain_step(_t("bd.storecap", lang),
+                                "{0:,.0f} л".format(eff_cap), cap_bonus, "+", running))
+    if slot_bonus > 0:
+        running += slot_bonus
+        steps.append(chain_step(_t("spec.slots", lang),
+                                "%d" % slots, slot_bonus, "+", running))
+    if prod_bonus > 0:
+        running += prod_bonus
+        steps.append(chain_step(_t("bd.upkeep", lang),
+                                "{0:,.0f}/ч".format(prod_cost), prod_bonus, "+", running))
+
+    running = sum_part * cat_mult
+    if abs(cat_mult - 1.0) > 1e-6:
+        steps.append(chain_step(_t("cat." + cat_key, lang), "x", cat_mult, "x", running))
+
+    if abs(size_mult - 1.0) > 1e-6:
+        running *= size_mult
+        steps.append(chain_step(_t("bd.size", lang), size_lbl or "", size_mult, "x", running))
+
+    if abs(thr_mult - 1.0) > 1e-6:
+        running *= thr_mult
+        steps.append(chain_step(_t("bd.cycles", lang),
+                                "{0:,.0f} л/ч".format(prod_throughput), thr_mult, "x", running))
+
+    if abs(goods_mult - 1.0) > 1e-6:
+        running *= goods_mult
+        steps.append(chain_step(_t("bd.goods", lang), str(int(goods_count or 0)),
+                                goods_mult, "x", running))
+
+    if abs(k_place - 1.0) > 1e-6:
+        running *= k_place
+        steps.append(chain_step(_t("bd.k_placeable", lang), "", k_place, "x", running))
+
+    if abs(gs - 1.0) > 1e-6:
+        running *= gs
+        steps.append(chain_step(_t("bd.diff", lang), "scale", gs, "x", running))
+
+    return max(200.0, running), steps
+
+
+def calc_placeable_price(category: str, title: str, filename: str,
+                         capacity: float, slots: int, prod_cost: float,
+                         k_place: float, gs: float,
+                         prod_throughput: float = 0.0, goods_count: int = 0,
+                         storage_capacity: float = 0.0) -> float:
+    """Совместимость со старыми вызовами: только цена, без цепочки."""
+    price, _steps = calc_placeable_price_ex(category, title, filename, capacity, slots,
+                                            prod_cost, k_place, gs, prod_throughput,
+                                            goods_count, storage_capacity)
+    return price
 
 
 def detect_placeable_size(title: str, filename: str) -> Tuple[str, float]:
@@ -155,6 +264,36 @@ def apply_item_multipliers(base_eur: float, country_mult: float,
     k_retro = float(cfg.k_retro) if (is_retro and cfg.retro_enabled) else 1.0
     price = base_eur * country_mult * k_retro
     return price, country_mult, k_retro
+
+
+def finish_chain(inner: List[Dict[str, Any]], base_eur: float, country_mult: float,
+                 k_retro: float, is_retro: bool, xml_factor: float, new_xml: int,
+                 new_rub: int, lang: str = "ru", manual: bool = False) -> List[Dict[str, Any]]:
+    """Достраивает разбор цены: страна → ретро → округление → запись в XML → рубли."""
+    from core.i18n import t as _t
+    steps = list(inner or [])
+    if manual:
+        return steps + [chain_step(_t("bd.manual", lang), "", float(new_xml), "=", new_xml)]
+    steps += multiplier_chain_steps(base_eur, country_mult, is_retro, k_retro, lang)
+    steps.append(chain_step(_t("bd.round", lang), "x{0:,.2f}".format(float(xml_factor or 1.0)),
+                            float(xml_factor or 1.0), "=", float(new_xml)))
+    steps.append(chain_step(_t("bd.to_rub", lang), "", 0.0, "=>", float(new_rub)))
+    return steps
+
+
+def multiplier_chain_steps(base_eur: float, country_mult: float, is_retro: bool,
+                           k_retro: float, lang: str = "ru") -> List[Dict[str, Any]]:
+    """Шапки «страна» и «ретро» для разбора цены (общие для техники и зданий)."""
+    from core.i18n import t as _t
+    steps: List[Dict[str, Any]] = []
+    run = float(base_eur)
+    if abs(float(country_mult) - 1.0) > 1e-6:
+        run *= float(country_mult)
+        steps.append(chain_step(_t("bd.country", lang), "x", country_mult, "x", run))
+    if is_retro and float(k_retro or 1.0) != 1.0:
+        run *= float(k_retro)
+        steps.append(chain_step(_t("bd.retro", lang), "", k_retro, "x", run))
+    return steps
 
 
 def motor_price_for_delta(base_eur: float, hp_delta: float, bm: float,

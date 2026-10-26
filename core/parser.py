@@ -9,14 +9,19 @@ import hashlib, math, os, re, shutil, zipfile
 import xml.etree.ElementTree as ET
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from core.ai import detect_country_and_retro
+from core.ai import ai_cheat_hint, detect_country_and_retro
 from core.ai_state import get_learned, get_spec_patches
+from core.cheat import evaluate as cheat_evaluate
+from core.i18n import category_label as i18n_category, country_name as i18n_country
+from core.i18n import norm_lang, t as i18n_t
 from core.specs import apply_patch, present_fields
-from core.models import BalancerConfig, ItemSpec, MotorSpec, ScanTarget
+from core.models import (BalancerConfig, ItemSpec, MotorSpec, ProductionSpec, ScanTarget,
+                         subgroup_for)
 from core.pricing import (
     FUEL_FILL_TYPES, PLACEABLE_CATEGORIES, VEHICLE_IGNORED_CATS, VEHICLE_IGNORED_FN,
-    apply_item_multipliers, calc_placeable_price, calc_vehicle_price, clean_round,
-    detect_placeable_size, field_price, motor_price_for_delta, wear_for_item,
+    apply_item_multipliers, calc_placeable_price, calc_placeable_price_ex,
+    calc_vehicle_price, chain_step, clean_round, detect_placeable_size, field_price,
+    finish_chain, motor_price_for_delta, rub_from_xml, wear_for_item,
 )
 
 
@@ -176,6 +181,102 @@ def extract_placeable_data(root: ET.Element) -> Tuple[float, int, float]:
     return cap, slots, prod
 
 
+def _capacity_of(el: ET.Element) -> float:
+    """Вместимость из атрибута capacity ИЛИ дочернего <capacity> — обе формы в модах."""
+    v = pf(el.get("capacity"))
+    if v <= 0:
+        c = el.find("capacity")
+        if c is not None:
+            v = pf(c.text)
+    return max(0.0, v)
+
+
+def _attr_num(el: ET.Element, *names: str) -> float:
+    """Числовой атрибут без учёта регистра (моды пишут и costsPerActiveHour, и costPerHour)."""
+    low = {str(k).lower(): v for k, v in el.attrib.items()}
+    for n in names:
+        v = low.get(n.lower())
+        if v is not None:
+            f = pf(v)
+            if f > 0:
+                return f
+    return 0.0
+
+
+def _prod_amount(el: ET.Element) -> float:
+    return max(0.0, _attr_num(el, "amount", "amountLiter", "capacity", "value"))
+
+
+def _prod_name(el: ET.Element) -> str:
+    for a in ("product", "fillType", "fillType", "fillTypes", "name"):
+        v = (el.get(a) or "").strip()
+        if v:
+            return v
+    return ""
+
+
+def extract_production_specs(root: ET.Element, l10n: Dict[str, str]) -> List[ProductionSpec]:
+    """Все блоки <production>: циклы/ч, сырьё и выпуск за цикл, расходы, свои склады."""
+    out: List[ProductionSpec] = []
+    nodes = root.findall(".//productions/production") or root.findall(".//production")
+    for i, pr in enumerate(nodes):
+        title = (pr.get("name") or "").strip()
+        loc = localized(pr.find("name"), l10n)
+        if loc:
+            title = loc
+        if title.startswith("$l10n") or title.startswith("$l100"):
+            title = ""
+        ins = list(pr.findall("input")) + [e for g in pr.findall("inputs") for e in g.findall("input")]
+        outs = (list(pr.findall("output")) +
+                [e for g in pr.findall("outputs") for e in g.findall("output")])
+        st = 0.0
+        for se in list(pr.findall(".//storages/storage")) + list(pr.findall("./storage")):
+            st += _capacity_of(se)
+            for n in se.findall("node"):
+                st += max(0.0, pf(n.get("capacity")))
+        out.append(ProductionSpec(
+            index=i, title=title,
+            cycles_per_hour=_attr_num(pr, "cyclesPerHour", "cyclesperhour", "cyclePerHour"),
+            input_amount=round(sum(_prod_amount(e) for e in ins), 2),
+            output_amount=round(sum(_prod_amount(e) for e in outs), 2),
+            costs_per_active_hour=_attr_num(pr, "costsPerActiveHour", "costPerActiveHour"),
+            costs_per_active_month=_attr_num(pr, "costsPerActiveMonth", "costPerActiveMonth"),
+            storage_capacity=round(st, 2),
+            inputs=[{"product": _prod_name(e), "amount": round(_prod_amount(e), 2)} for e in ins],
+            outputs=[{"product": _prod_name(e), "amount": round(_prod_amount(e), 2)} for e in outs],
+        ))
+    return out
+
+
+def extract_plant_storage(root: ET.Element) -> float:
+    """Вместимость внутренних складов здания (storages/storage, включая node-ячейки)."""
+    total = 0.0
+    for se in root.findall(".//storages/storage"):
+        total += _capacity_of(se)
+        for n in se.findall("node"):
+            total += max(0.0, pf(n.get("capacity")))
+    return max(0.0, round(total, 2))
+
+
+GOODS_IGNORE = set(x.lower() for x in FUEL_FILL_TYPES) | {
+    "unkown", "none", "true", "false", "all", "everything", "pallet", "bale"}
+
+
+def count_accepted_goods(root: ET.Element) -> int:
+    """Сколько разных типов продукции позиция принимает (нужно для точек продажи)."""
+    toks = set()
+    for el in root.iter():
+        tag = str(el.tag).lower()
+        if not any(k in tag for k in ("sell", "fill", "input", "storage", "trigger", "slot")):
+            continue
+        for a in ("fillTypes", "fillType", "product", "products", "type", "value", "name"):
+            for tok in re.split(r"[,;\s]+", (el.get(a) or "")):
+                tok = tok.strip().lower()
+                if len(tok) >= 3 and tok not in GOODS_IGNORE and not tok.startswith("$"):
+                    toks.add(tok)
+    return len(toks)
+
+
 def is_placeable_xml(root: ET.Element, category: str, filename: str) -> bool:
     if root.tag == "placeable":
         return True
@@ -238,6 +339,15 @@ def extract_field_data(root: ET.Element) -> Tuple[float, Optional[Tuple[float, f
 
 # ── Обработка одного XML ------------------------------------------------------
 
+def _set_num(el: ET.Element, value: Any) -> bool:
+    """Пишет число, только если оно реально меняется (иначе архив пересобирается впустую)."""
+    want = str(int(round(float(value))))
+    if (el.text or "").strip() == want:
+        return False
+    el.text = want
+    return True
+
+
 def process_xml_root(root: ET.Element, rel_path: str, mod_name: str,
                      l10n: Dict[str, str], cfg: BalancerConfig,
                      overrides: Optional[Dict[str, int]] = None,
@@ -260,6 +370,7 @@ def process_xml_root(root: ET.Element, rel_path: str, mod_name: str,
     ukey = f"{mod_name}::{rel_path}"
 
     xm = cfg.xml_factor
+    lang = norm_lang(getattr(cfg, "ui_lang", "ru"))
 
     is_field = is_field_xml(root, category, rel_path)
     is_place = is_placeable_xml(root, category, rel_path)
@@ -274,11 +385,8 @@ def process_xml_root(root: ET.Element, rel_path: str, mod_name: str,
         except Exception:
             pass
 
-    if cfg.scan_target == ScanTarget.VEHICLES and (is_field or is_place):
-        return None
-    if cfg.scan_target == ScanTarget.PLACEABLES and (is_field or not is_place):
-        return None
-    if cfg.scan_target == ScanTarget.FIELDS and not is_field:
+    # что сканируем: мультивыбор категорий (техника / здания / поля)
+    if not cfg.wants(kind):
         return None
 
     # ── ПОЛЕ ──
@@ -291,10 +399,11 @@ def process_xml_root(root: ET.Element, rel_path: str, mod_name: str,
 
         reasons = []
         if not area_ok:
-            reasons.append("площадь не определена")
+            reasons.append(i18n_t("src.field_noarea", lang))
         if cfg.adjust_field_prices and dist is None:
-            reasons.append("нет координат магазина/поля")
+            reasons.append(i18n_t("src.field_noshop", lang))
 
+        steps: List[Dict[str, Any]] = []
         if overrides and ukey in overrides:
             new_xml = int(overrides[ukey])
             base_eur = new_xml / xm
@@ -305,22 +414,37 @@ def process_xml_root(root: ET.Element, rel_path: str, mod_name: str,
             plain_eur = field_price(area if area_ok else 0.0, None, cfg)
             base_eur = field_price(area if area_ok else 0.0, dist, cfg)
             new_xml = clean_round(base_eur * xm)
+            steps = [chain_step(i18n_t("bd.field_area", lang),
+                                "{0:g} га".format(area if area_ok else 0.0),
+                                max(1500.0, float(area or 0.0) * 4800.0), "+base",
+                                float(area if area_ok else 0.0) * 4800.0)]
+            if cfg.adjust_field_prices and dist is not None:
+                dm = (base_eur / plain_eur) if plain_eur else 1.0
+                steps.append(chain_step(i18n_t("bd.field_dist", lang),
+                                         "{0:g} км".format(dist), dm, "x", base_eur))
+            if abs(cfg.k_field - 1.0) > 1e-6:
+                steps.append(chain_step(i18n_t("bd.k_field", lang), "", cfg.k_field, "x",
+                                         base_eur * cfg.k_field))
 
-        new_rub = clean_round(cfg.rubles(base_eur))
-        if write:
-            price_el.text = str(new_xml)
+        new_rub = rub_from_xml(new_xml, cfg)
+        chain = finish_chain(steps, base_eur,
+                             1.0, 1.0, False, xm, new_xml, new_rub, lang,
+                             manual=bool(overrides and ukey in overrides))
+        changed = bool(write and _set_num(price_el, new_xml))
 
         return ItemSpec(
             mod_name=mod_name, xml_rel_path=rel_path, item_type="field",
             spec_fields=present_fields(root, kind),
             title=title, brand=brand, category="field",
-            category_label="Поле", country="—", country_flag="🌾",
+            category_label=i18n_t("cat.field", lang), country="—", country_flag="🌾",
+            price_chain=chain, ui_lang=lang, needs_write=changed,
             old_price=old_price, new_price=new_xml, new_price_rub=new_rub,
             base_price=clean_round(plain_eur * xm),
             field_area=area if area_ok else 0.0,
             field_distance=(dist if dist is not None else -1.0),
             field_coord=coord, needs_review=bool(reasons),
-            ai_reason=("Поле: " + ", ".join(reasons)) if reasons else "Поле",
+            ai_reason=(i18n_t("src.field_prefix", lang, ", ".join(reasons))
+                       if reasons else i18n_t("src.field", lang)),
             country_mult=cfg.k_field,
         )
 
@@ -328,45 +452,89 @@ def process_xml_root(root: ET.Element, rel_path: str, mod_name: str,
     if is_place:
         cap, slots, prod = extract_placeable_data(root)
         size_lbl, _ = detect_placeable_size(title, rel_path)
-        cat_info = PLACEABLE_CATEGORIES.get(category, PLACEABLE_CATEGORIES["misc"])
+        cat_key = str(category or "misc").strip().lower()
+        cat_info = PLACEABLE_CATEGORIES.get(cat_key, PLACEABLE_CATEGORIES["misc"])
+        cat_lbl = i18n_category(cat_key, lang, cat_info.get("label", cat_key))
+        sg = subgroup_for(cat_key, "placeable")
+
+        # линии производства: циклы/ч, выпуск и сырьё за цикл, расходы, склады
+        lines = extract_production_specs(root, l10n)
+        plant_cap = extract_plant_storage(root)
+        if plant_cap <= 0:
+            plant_cap = round(sum(p.storage_capacity for p in lines), 2)
+        thr = round(sum(p.throughput for p in lines), 2)        # л готового продукта в час
+        cph = round(sum(p.cycles_per_hour for p in lines), 2)
+        out_am = round(sum(p.output_amount for p in lines), 2)
+        in_am = round(sum(p.input_amount for p in lines), 2)
+        cm = round(sum(p.costs_per_active_month for p in lines), 2)
+        # extract_placeable_data уже привёл costsPerActiveMonth к часам (cm/24) —
+        # вторично складывать нельзя: расходы попадали в цену дважды.
+        prod_hour = prod
+        # «сколько товаров принимает» считаем только у точек продажи — там это и есть ценность
+        goods = count_accepted_goods(root) if sg == "selling" else 0
+        gv = pf((patch or {}).get("goods_count"), 0.0)
+        if gv > 0:
+            goods = int(gv)
 
         country, flag, k_country, is_retro, review, reason = detect_country_and_retro(
             brand, title, rel_path, mod_name, cfg, get_learned())
         if brand in ("", "GENERIC", "-"):
             country, flag, k_country, is_retro = "—", "🏗", 1.0, False
-            review, reason = False, "Здание: бренд не указан"
+            review, reason = False, i18n_t("src.brand_fix", lang)
+        if sg == "selling" and goods <= 0:
+            review = True
+            reason = (reason + " · " if reason else "") + i18n_t("src.no_goods", lang)
 
         k_retro_eff = float(cfg.k_retro) if (is_retro and cfg.retro_enabled) else 1.0
+        steps: List[Dict[str, Any]] = []
+        manual_price = None
         if overrides and ukey in overrides:
             new_xml = int(overrides[ukey])
+            manual_price = new_xml
             base_eur = new_xml / (k_country * k_retro_eff * xm)
         else:
-            base_eur = calc_placeable_price(category, title, rel_path, cap, slots,
-                                            prod, cfg.k_placeable,
-                                            cfg.global_difficulty_scale)
+            base_eur, steps = calc_placeable_price_ex(
+                cat_key, title, rel_path, cap, slots, prod_hour, cfg.k_placeable,
+                cfg.global_difficulty_scale, prod_throughput=thr, goods_count=goods,
+                storage_capacity=plant_cap, lang=lang)
             priced, k_country, k_retro_eff = apply_item_multipliers(
                 base_eur, k_country, is_retro, cfg)
             new_xml = clean_round(priced * xm)
 
-        new_rub = clean_round(cfg.rubles(base_eur * k_country * k_retro_eff))
+        new_rub = rub_from_xml(new_xml, cfg)
+        chain = finish_chain(steps, base_eur, k_country, k_retro_eff, is_retro, xm,
+                             new_xml, new_rub, lang, manual=manual_price is not None)
+        verdict = cheat_evaluate(
+            {"item_type": "placeable", "hp": 0.0, "max_speed": 0.0, "working_width": 0.0,
+             "capacity": max(cap, plant_cap), "needed_hp": 0.0, "prod_cycles": cph,
+             "old_price": old_price, "new_price": new_xml},
+            cfg, ai_cheat_hint(brand, title, rel_path, mod_name))
+        changed = False
         if write:
-            price_el.text = str(new_xml)
+            changed = _set_num(price_el, new_xml)
             upkeep = sd.find("dailyUpkeep")
             if upkeep is not None:
-                upkeep.text = str(max(1, int(round(new_xml * 0.002))))
+                changed = _set_num(upkeep, max(1, int(round(new_xml * 0.002)))) or changed
+            if patch:
+                changed = True          # ручные правки ТТХ всё равно надо записать
 
         return ItemSpec(
             mod_name=mod_name, xml_rel_path=rel_path, item_type="placeable",
             spec_fields=present_fields(root, kind),
-            title=title, brand=brand, category=category,
-            category_label=cat_info["label"], country=country, country_flag=flag,
-            is_retro=is_retro, old_price=old_price,
+            title=title, brand=brand, category=cat_key,
+            category_label=cat_lbl, country=country, country_flag=flag,
+            is_retro=is_retro, old_price=old_price, manual_price=manual_price,
             new_price=new_xml, new_price_rub=new_rub,
             base_price=clean_round(base_eur * xm),
-            capacity=cap, slots=slots, production_cost=prod, size_label=size_lbl,
+            capacity=cap, slots=slots, production_cost=prod_hour, size_label=size_lbl,
             ai_reason=reason, brand_mult=cfg.k_placeable,
             country_mult=k_country, retro_mult=k_retro_eff, needs_review=review,
             wear_mult=wear_for_item(is_retro, cfg),
+            subgroup=sg, productions=lines, prod_cycles=cph, prod_output=out_am,
+            prod_input=in_am, prod_cost_month=cm, storage_capacity=plant_cap,
+            goods_count=goods, price_chain=chain, ui_lang=lang, needs_write=changed,
+            is_cheat=verdict["is_cheat"], cheat_reason=verdict["cheat_reason"],
+            cheat_by=verdict["cheat_by"],
         )
 
     # ── ТЕХНИКА ──
@@ -398,24 +566,43 @@ def process_xml_root(root: ET.Element, rel_path: str, mod_name: str,
     k_retro_eff = float(cfg.k_retro) if (is_retro and cfg.retro_enabled) else 1.0
     wear = wear_for_item(is_retro, cfg)
 
+    steps: List[Dict[str, Any]] = []
+    manual_price = None
     if overrides and ukey in overrides:
         new_xml = int(overrides[ukey])
+        manual_price = new_xml
         base_eur = new_xml / (k_country * k_retro_eff * xm)
     else:
+        raw_eur = calc_vehicle_price(category, base_hp, max_spd, base_cap, ww, nhp, 1.0, 1.0)
         eur_raw = calc_vehicle_price(category, base_hp, max_spd, base_cap, ww, nhp,
                                      1.0, cfg.global_difficulty_scale)
+        steps = [chain_step(i18n_t("bd.base", lang),
+                            i18n_category(category, lang, category), raw_eur, "", raw_eur)]
+        if abs(cfg.global_difficulty_scale - 1.0) > 1e-6:
+            steps.append(chain_step(i18n_t("bd.diff", lang), "scale",
+                                    cfg.global_difficulty_scale, "x", eur_raw))
         base_eur = eur_raw
         priced, k_country, k_retro_eff = apply_item_multipliers(
             eur_raw, k_country, is_retro, cfg)
         new_xml = clean_round(priced * xm)
 
-    new_rub = clean_round(cfg.rubles(new_xml / xm)) if xm else new_xml
+    new_rub = rub_from_xml(new_xml, cfg)
+    chain = finish_chain(steps, base_eur, k_country, k_retro_eff, is_retro, xm,
+                         new_xml, new_rub, lang, manual=manual_price is not None)
+    verdict = cheat_evaluate(
+        {"item_type": "vehicle", "hp": base_hp, "max_speed": max_spd, "working_width": ww,
+         "capacity": base_cap, "needed_hp": nhp, "prod_cycles": 0.0,
+         "old_price": old_price, "new_price": new_xml},
+        cfg, ai_cheat_hint(brand, title, rel_path, mod_name))
+    changed = False
 
     if write:
-        price_el.text = str(new_xml)
+        changed = _set_num(price_el, new_xml)
         upkeep = sd.find("dailyUpkeep")
         if upkeep is not None:
-            upkeep.text = str(max(5, int(round(new_xml * 0.0025 * wear))))
+            changed = _set_num(upkeep, max(5, int(round(new_xml * 0.0025 * wear)))) or changed
+        if patch:
+            changed = True
 
     # ── Комплектации (несколько двигателей) ──
     motor_specs: List[MotorSpec] = []
@@ -445,8 +632,11 @@ def process_xml_root(root: ET.Element, rel_path: str, mod_name: str,
         mod_name=mod_name, xml_rel_path=rel_path, item_type="vehicle",
         spec_fields=present_fields(root, kind),
         title=title, brand=brand, category=category,
-        category_label=category, country=country, country_flag=flag,
-        is_retro=is_retro, manual_price=(int(overrides[ukey]) if overrides and ukey in overrides else None),
+        category_label=i18n_category(category, lang, category),
+        country=country, country_flag=flag,
+        is_retro=is_retro, manual_price=manual_price,
+        price_chain=chain, ui_lang=lang, needs_write=changed, is_cheat=verdict["is_cheat"],
+        cheat_reason=verdict["cheat_reason"], cheat_by=verdict["cheat_by"],
         old_price=old_price, new_price=new_xml, new_price_rub=new_rub,
         base_price=clean_round(base_eur * xm), hp=base_hp, max_speed=max_spd,
         capacity=base_cap, working_width=ww, needed_hp=nhp,
@@ -562,6 +752,41 @@ def process_mod(mod_path: str, cfg: BalancerConfig, apply: bool = False,
     return results
 
 
+def finalize_spec(s: ItemSpec, cfg: BalancerConfig, steps: List[Dict[str, Any]],
+                  base_eur: float, k_country: float, k_retro: float,
+                  manual: bool = False) -> ItemSpec:
+    """Достраивает разбор цены (видно всегда) и вердикт «читерный» для позиции."""
+    lang = norm_lang(getattr(cfg, "ui_lang", "ru"))
+    s.ui_lang = lang
+    s.price_chain = finish_chain(steps, base_eur, k_country, k_retro, s.is_retro,
+                                 cfg.xml_factor, s.new_price, s.new_price_rub, lang,
+                                 manual=manual)
+    hint = ai_cheat_hint(s.brand, s.title, s.xml_rel_path, s.mod_name)
+    v = cheat_evaluate({
+        "item_type": s.item_type, "hp": s.hp, "max_speed": s.max_speed,
+        "working_width": s.working_width, "needed_hp": s.needed_hp,
+        "capacity": max(s.capacity, s.storage_capacity) if s.item_type == "placeable" else s.capacity,
+        "prod_cycles": s.prod_cycles, "old_price": s.old_price, "new_price": s.new_price,
+    }, cfg, hint)
+    s.is_cheat, s.cheat_reason, s.cheat_by = v["is_cheat"], v["cheat_reason"], v["cheat_by"]
+    return s
+
+
+def vehicle_chain_steps(s: ItemSpec, cfg: BalancerConfig, cat: str, raw: Dict[str, Any],
+                        lang: str) -> List[Dict[str, Any]]:
+    """Шаги разбора для техники: база по классу + общий масштаб сложности."""
+    raw_eur = calc_vehicle_price(cat, raw.get("hp", 0.0), raw.get("spd", 0.0),
+                                raw.get("cap", 0.0), raw.get("ww", 0.0),
+                                raw.get("nhp", 0.0), 1.0, 1.0)
+    steps = [chain_step(i18n_t("bd.base", lang), i18n_category(cat, lang, cat),
+                        raw_eur, "", raw_eur)]
+    if abs(float(cfg.global_difficulty_scale) - 1.0) > 1e-6:
+        steps.append(chain_step(i18n_t("bd.diff", lang), "scale",
+                                cfg.global_difficulty_scale, "x",
+                                raw_eur * cfg.global_difficulty_scale))
+    return steps
+
+
 def recalc_specs(specs: List[ItemSpec], cfg: BalancerConfig,
                  overrides: Dict[str, int], raw_cache: Dict[str, Dict[str, Any]]
                  ) -> List[ItemSpec]:
@@ -581,26 +806,46 @@ def recalc_specs(specs: List[ItemSpec], cfg: BalancerConfig,
             base_eur = field_price(area, dist, cfg)
             s.base_price = clean_round(field_price(area, None, cfg) * xm)
             s.new_price = int(overrides.get(s.unique_key, clean_round(base_eur * xm)))
-            s.new_price_rub = clean_round(cfg.rubles(base_eur))
+            s.new_price_rub = rub_from_xml(s.new_price, cfg)
             s.country_mult = cfg.k_field
             if s.field_manual:
                 s.needs_review = s.field_area <= 0 or (cfg.adjust_field_prices
                                                        and s.field_distance < 0)
+            lang = norm_lang(cfg.ui_lang)
+            fsteps = [chain_step(i18n_t("bd.field_area", lang),
+                                 "{0:g} га".format(area), max(1500.0, area * 4800.0),
+                                 "+base", area * 4800.0)]
+            if cfg.adjust_field_prices and dist is not None:
+                plain = field_price(area, None, cfg)
+                fsteps.append(chain_step(i18n_t("bd.field_dist", lang),
+                                         "{0:g} км".format(dist),
+                                         (base_eur / plain) if plain else 1.0, "x", base_eur))
+            if abs(cfg.k_field - 1.0) > 1e-6:
+                fsteps.append(chain_step(i18n_t("bd.k_field", lang), "", cfg.k_field, "x",
+                                         base_eur))
+            finalize_spec(s, cfg, fsteps, base_eur, 1.0, 1.0,
+                          manual=s.unique_key in overrides)
             out.append(s)
             continue
 
         if s.item_type == "placeable":
-            base_eur = calc_placeable_price(
-                c.get("category", "misc"), s.title, s.xml_rel_path,
-                c.get("cap", 0.0), c.get("slots", 0), c.get("prod", 0.0),
-                cfg.k_placeable, cfg.global_difficulty_scale)
+            lang = norm_lang(cfg.ui_lang)
+            cat = c.get("category", "misc")
+            goods = int(s.goods_count or c.get("goods", 0) or 0)
+            base_eur, psteps = calc_placeable_price_ex(
+                cat, s.title, s.xml_rel_path, c.get("cap", 0.0), c.get("slots", 0),
+                c.get("prod", 0.0), cfg.k_placeable, cfg.global_difficulty_scale,
+                prod_throughput=c.get("thr", 0.0), goods_count=goods,
+                storage_capacity=c.get("scap", 0.0), lang=lang)
             k_c = cfg.multiplier_for(s.country) if s.country in _known_countries() else 1.0
             priced, k_c, k_r = apply_item_multipliers(base_eur, k_c, s.is_retro, cfg)
             s.base_price = clean_round(base_eur * xm)
             s.country_mult, s.retro_mult = k_c, k_r
             s.wear_mult = wear_for_item(s.is_retro, cfg)
             s.new_price = int(overrides.get(s.unique_key, clean_round(priced * xm)))
-            s.new_price_rub = clean_round(cfg.rubles(priced))
+            s.new_price_rub = rub_from_xml(s.new_price, cfg)
+            finalize_spec(s, cfg, psteps, base_eur, k_c, k_r,
+                          manual=s.unique_key in overrides)
             out.append(s)
             continue
 
@@ -620,7 +865,12 @@ def recalc_specs(specs: List[ItemSpec], cfg: BalancerConfig,
             s.new_price = int(overrides[s.unique_key])
         else:
             s.new_price = clean_round(priced * xm)
-        s.new_price_rub = clean_round(cfg.rubles(s.new_price / xm)) if xm else s.new_price
+        s.new_price_rub = rub_from_xml(s.new_price, cfg)
+
+        finalize_spec(s, cfg,
+                      vehicle_chain_steps(s, cfg, c.get("category", "misc"), c,
+                                          norm_lang(cfg.ui_lang)),
+                      base_eur, k_country, k_retro, manual=s.unique_key in overrides)
 
         cnt = 0
         s.motor_prices = []
