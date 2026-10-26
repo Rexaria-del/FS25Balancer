@@ -11,7 +11,7 @@ from core.countries import countries_payload, GROUP_LABELS
 from core.service import BalancerService, drain_events
 from core.models import SCAN_TARGET_LABELS, ScanTarget
 
-APP_VERSION_STR = "15.0"
+APP_VERSION_STR = "15.4"
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 CHANGELOG = [
