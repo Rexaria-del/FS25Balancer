@@ -381,12 +381,15 @@ def ask_ai_classification(brand: str, title: str, filename: str, mod_name: str,
 def detect_country_and_retro(brand: str, title: str, filename: str, mod_name: str,
                              cfg: BalancerConfig, learned: Dict[str, str]
                              ) -> Tuple[str, str, float, bool, bool, str]:
-    """(страна, флаг, коэф, ретро, need_review, причина). Только выбранный пул стран."""
+    """(страна, флаг, коэф, ретро, need_review, причина, вид источника).
+
+    Вид источника: dict | memory | ai — словари, память брендов или локальный ИИ.
+    """
     cb = (brand or "").strip().lower()
     allowed = [c for c in (cfg.selected_countries or []) if c in ALL_COUNTRIES]
     lang = getattr(cfg, "ui_lang", "ru")
     if not allowed:
-        return ("Неизвестно", "❓", 1.0, False, True, t("src.no_pool", lang))
+        return ("Неизвестно", "❓", 1.0, False, True, t("src.no_pool", lang), "dict")
 
     combined = f"{brand} {title} {filename} {mod_name}".lower()
     tokens = set(re.findall(r"[a-z0-9]+", combined))
@@ -399,7 +402,7 @@ def detect_country_and_retro(brand: str, title: str, filename: str, mod_name: st
             # у одной марки выпускаются и ретро, и современные модели.
             is_retro = check_retro_keywords(combined)
             return (country, info["flag"], cfg.multiplier_for(country), is_retro, False,
-                    t("src.memory", lang))
+                    t("src.memory", lang), "memory")
 
     from core.ai_state import get_pro_data
     pro = get_pro_data()
@@ -412,7 +415,8 @@ def detect_country_and_retro(brand: str, title: str, filename: str, mod_name: st
             info = country_info(country)
             is_retro = check_retro_keywords(combined)
             return (country, info["flag"], cfg.multiplier_for(country), is_retro, False,
-                    t("src.brand_in", lang, country_name(country, info.get("iso2", ""), lang)))
+                    t("src.brand_in", lang, country_name(country, info.get("iso2", ""), lang)),
+                    "dict")
 
     kw_retro = check_retro_keywords(combined)
     if cfg.use_local_ai:
@@ -421,13 +425,13 @@ def detect_country_and_retro(brand: str, title: str, filename: str, mod_name: st
         if country and country in allowed:
             info = country_info(country)
             return (country, info["flag"], cfg.multiplier_for(country),
-                    bool(is_retro or kw_retro), False, reason)
+                    bool(is_retro or kw_retro), False, reason, "ai")
         return ("⚠️ Проверить", "❓", cfg.multiplier_for(allowed[0]),
-                kw_retro, True, t("src.ai_prefix", lang, reason))
+                kw_retro, True, t("src.ai_prefix", lang, reason), "dict")
 
     info = country_info(allowed[0])
     return (allowed[0], info["flag"], cfg.multiplier_for(allowed[0]),
-            kw_retro, True, t("src.default", lang))
+            kw_retro, True, t("src.default", lang), "dict")
 
 
 RETRO_KEYWORDS = [

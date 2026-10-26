@@ -332,5 +332,27 @@ class ReleaseChecks(unittest.TestCase):
         self.assertTrue(any(event["type"] == "error" for event in drain_events()))
 
 
+    def test_legacy_backup_migration_and_source_kind(self):
+        target = self.make_mod()
+        self.backup.mkdir()
+        (self.backup / "Test.zip").write_bytes(b"old full mod backup")
+        service = self.service(target)
+        tractor = next(item for item in service.specs if item.item_type == "vehicle")
+        self.assertEqual(tractor.source_kind, "dict")
+        service._apply_worker()
+        self.assertFalse(service.last_error)
+        self.assertTrue((self.backup / "Test.zip").is_dir())
+        self.assertTrue((self.backup / "Test.zip.legacy").is_file())
+        service._restore_worker(str(self.root), str(self.backup))
+        self.assertEqual((self.root / "Test.zip").read_bytes(), b"old full mod backup")
+
+
+    def test_import_dialog_file_filters_parse(self):
+        from webview.util import parse_file_type
+        import app
+        for ft in app.IMPORT_FILE_TYPES:
+            parse_file_type(ft)
+
+
 if __name__ == "__main__":
     unittest.main()

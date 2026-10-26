@@ -8,7 +8,8 @@ const translationCache = new Map();
 const UI_PAIRS = [
   ["FS25 Автобалансировщик", "FS25 Balancer"],
   ["Проверка баланса модов", "Mod balance checks"],
-  ["Подозрительные", "Flagged mods"], ["Выбрано:", "Selected:"],
+  ["Подозрительные", "Flagged mods"], ["🤖 ИИ", "🤖 AI"], ["Выбрано:", "Selected:"],
+  ["Как определены страна/ретро", "How country/retro were determined"],
   ["Назначить страну", "Assign country"], ["Выбрать видимые", "Select visible"],
   ["Снять выделение", "Clear selection"], ["Старая", "Original"], ["₽ итог", "RUB total"],
   ["Валюта в моде", "Mod currency"], ["пишем ₽", "write RUB"], ["пишем €", "write EUR"],
@@ -228,7 +229,7 @@ function applyLanguage(language) {
   translationCache.clear();
   try { localStorage.setItem("fs25_language", UI_LANG); } catch (_) {}
   document.documentElement.lang = UI_LANG;
-  document.title = "FS25 Balancer v16.0";
+  document.title = "FS25 Balancer v16.1";
   const button = document.querySelector("#languageSwitch");
   if (button) {
     button.textContent = UI_LANG === "en" ? "🌐 English / RU" : "🌐 Русский / EN";

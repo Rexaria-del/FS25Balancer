@@ -449,7 +449,7 @@ def process_xml_root(root: ET.Element, rel_path: str, mod_name: str,
             field_coord=coord, needs_review=bool(reasons),
             ai_reason=(i18n_t("src.field_prefix", lang, ", ".join(reasons))
                        if reasons else i18n_t("src.field", lang)),
-            country_mult=cfg.k_field,
+            source_kind="field", country_mult=cfg.k_field,
         )
 
     # ── ЗДАНИЕ / ОБЪЕКТ ──
@@ -480,7 +480,7 @@ def process_xml_root(root: ET.Element, rel_path: str, mod_name: str,
         if gv > 0:
             goods = int(gv)
 
-        country, flag, k_country, is_retro, review, reason = detect_country_and_retro(
+        country, flag, k_country, is_retro, review, reason, source_kind = detect_country_and_retro(
             brand, title, rel_path, mod_name, cfg, get_learned())
         if brand in ("", "GENERIC", "-"):
             country, flag, k_country, is_retro = "—", "🏗", 1.0, False
@@ -532,7 +532,7 @@ def process_xml_root(root: ET.Element, rel_path: str, mod_name: str,
             new_price=new_xml, new_price_rub=new_rub,
             base_price=clean_round(base_eur * xm),
             capacity=cap, slots=slots, production_cost=prod_hour, size_label=size_lbl,
-            ai_reason=reason, brand_mult=cfg.k_placeable,
+            ai_reason=reason, source_kind=source_kind, brand_mult=cfg.k_placeable,
             country_mult=k_country, retro_mult=k_retro_eff, needs_review=review,
             wear_mult=wear_for_item(is_retro, cfg),
             subgroup=sg, productions=lines, prod_cycles=cph, prod_output=out_am,
@@ -565,7 +565,7 @@ def process_xml_root(root: ET.Element, rel_path: str, mod_name: str,
     base_hp, max_spd, motors = extract_motor(root)
     base_cap, _fu_cfgs = extract_caps(root)
 
-    country, flag, k_country, is_retro, review, reason = detect_country_and_retro(
+    country, flag, k_country, is_retro, review, reason, source_kind = detect_country_and_retro(
         brand, title, rel_path, mod_name, cfg, get_learned())
 
     k_retro_eff = float(cfg.k_retro) if (is_retro and cfg.retro_enabled) else 1.0
@@ -662,7 +662,7 @@ def process_xml_root(root: ET.Element, rel_path: str, mod_name: str,
         capacity=base_cap, working_width=ww, needed_hp=nhp,
         configs_updated=cnt, needs_review=review, brand_mult=1.0,
         country_mult=k_country, retro_mult=k_retro_eff, wear_mult=wear,
-        ai_reason=reason, motors=motor_specs, motor_prices=motor_prices,
+        ai_reason=reason, source_kind=source_kind, motors=motor_specs, motor_prices=motor_prices,
     )
 
 # ── Обработка мода (папка или zip) — алгоритм v13 ─────────────────────────────
@@ -825,9 +825,19 @@ def _backup_file(src: str, dst: str) -> None:
         DISK.add("backup", os.path.getsize(dst))
 
 
-def _backup_tree(src_dir: str, dst_dir: str) -> None:
-    if os.path.exists(dst_dir):
+def _migrate_legacy_mod_backup(backup_dir: Optional[str], mod_name: str) -> None:
+    """v13 хранил бэкап целым zip мода, v16 — папкой с XML: переименовываем коллизию."""
+    if not backup_dir:
         return
+    target = os.path.join(backup_dir, mod_name)
+    if os.path.isfile(target):
+        os.replace(target, target + ".legacy")
+
+
+def _backup_tree(src_dir: str, dst_dir: str) -> None:
+    if os.path.isdir(dst_dir):
+        return
+    _migrate_legacy_mod_backup(os.path.dirname(dst_dir), os.path.basename(dst_dir))
     try:
         for root, dirs, files in os.walk(src_dir):
             rel = os.path.relpath(root, src_dir)
@@ -1112,6 +1122,7 @@ def process_mod(mod_path: str, cfg: BalancerConfig, apply: bool = False,
     if os.path.isdir(mod_path):
         if mod_name.startswith("_backup"):
             return results
+        _migrate_legacy_mod_backup(backup_dir, mod_name)
         md_p = os.path.join(mod_path, "modDesc.xml")
         if not os.path.isfile(md_p):
             return results
@@ -1187,6 +1198,7 @@ def process_mod(mod_path: str, cfg: BalancerConfig, apply: bool = False,
                     continue
 
         if apply and modified and not (stop and stop.is_set()):
+            _migrate_legacy_mod_backup(backup_dir, mod_name)
             if cfg.create_backups and backup_dir:
                 # бэкапим только те XML, которые сейчас перепишем: из архива
                 # вытаскиваются исходные версии (килобайты), а не весь мод
@@ -1270,6 +1282,7 @@ def apply_prepared_mod(mod_path: str, specs: List[ItemSpec], cfg: BalancerConfig
     if not modified:
         return specs
     if cfg.create_backups:
+        _migrate_legacy_mod_backup(backup_dir, os.path.basename(mod_path))
         for name in modified:
             relative = name if mod_path.lower().endswith(".zip") else os.path.relpath(name, mod_path)
             if os.path.isabs(relative) or ".." in relative.replace("\\", "/").split("/"):

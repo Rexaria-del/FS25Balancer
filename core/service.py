@@ -6,7 +6,7 @@ UI не блокируется: все тяжёлые операции идут 
 """
 
 import concurrent.futures as _futures
-import math, os, threading, time
+import math, os, shutil, threading, time
 from collections import defaultdict
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -479,6 +479,14 @@ class BalancerService:
             for index, entry in enumerate(entries, 1):
                 src = os.path.join(backup_dir, entry)
                 if not os.path.isdir(src):
+                    base = entry[:-7] if entry.endswith(".legacy") else entry
+                    if base.lower().endswith(".zip") and os.path.isfile(src):
+                        dst = os.path.join(mods_dir, base)
+                        if os.path.isfile(dst):
+                            tmp = dst + ".tmp"
+                            shutil.copy2(src, tmp)
+                            os.replace(tmp, dst)
+                            total += 1
                     continue
                 mod_path = os.path.join(mods_dir, entry)
                 if not os.path.exists(mod_path):
@@ -814,6 +822,7 @@ class BalancerService:
                 s.country_flag = str(info["flag"])
                 s.needs_review = False
                 s.ai_reason = "Вручную"
+                s.source_kind = "manual"
                 self.reprice_item(s)
                 remember_brand(s.brand, country, False)
                 persist()
@@ -1222,6 +1231,7 @@ class BalancerService:
             fresh.price_source = s.price_source
             if s.ai_reason == "Вручную":
                 fresh.ai_reason, fresh.needs_review = s.ai_reason, False
+                fresh.source_kind = s.source_kind or "manual"
             try:
                 self.specs[self.specs.index(s)] = fresh
             except ValueError:
@@ -1262,6 +1272,7 @@ class BalancerService:
                 if ok_area and ok_dist:
                     s.needs_review = False
                     s.ai_reason = "Поле (вручную)"
+                    s.source_kind = "manual"
                 self._recalc_field(s)
                 return {"ok": True, "item": s.to_dict()}
         return {"ok": False, "error": "Поле не найдено"}

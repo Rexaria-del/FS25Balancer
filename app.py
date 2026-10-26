@@ -12,10 +12,19 @@ from core.i18n import lang_list, norm_lang, scan_target_label, subgroup_label
 from core.service import BalancerService, drain_events
 from core.models import (SCAN_CATEGORY_KEYS, SCAN_TARGET_LABELS, SUBGROUP_ORDER, ScanTarget)
 
-APP_VERSION_STR = "16.0"
+APP_VERSION_STR = "16.1"
 HERE = os.path.dirname(os.path.abspath(__file__))
 
+# pywebview принимает фильтр строго как "Описание (*.ext;*.ext2)": Win32-вид "desc|*.ext" и дефис в описании ломают parse_file_type.
+IMPORT_FILE_TYPES = ("Прайс бандл FS25 (*.json)", "Любой файл (*.*)")
+
 CHANGELOG = [
+    {"v": "16.1", "date": "2026-10-26", "items": [
+        "Исправлен WinError 183 при «Применить»: legacy-бэкапы v13 автоматически мигрируют в папки",
+        "Колонка «Источник»: бейджи классификации (словари / память / ИИ / вручную) и фильтр по ИИ",
+        "Исправлен диалог выбора файла при импорте прайс-бандла",
+        "Короткий README и дорожная карта: синхронизация сохранений для асинхронного кооператива",
+    ]},
     {"v": "16.0", "date": "2026-10-26", "items": [
         "Русский и английский интерфейс, подсказки и обучение; переключатель RU / EN",
         "Выбор категорий перед сканированием и подгрупп зданий в таблице",
@@ -228,8 +237,7 @@ class Api:
             return {"ok": False, "error": "Окно не готово"}
         try:
             result = self._win.create_file_dialog(
-                webview.OPEN_DIALOG,
-                file_types=("Прайс-бандл FS25 (*.json)|*.json", "Любой файл (*.*)|*.*"))
+                webview.OPEN_DIALOG, file_types=IMPORT_FILE_TYPES)
         except Exception as e:
             return {"ok": False, "error": str(e)}
         if not result:

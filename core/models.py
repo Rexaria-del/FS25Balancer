@@ -196,6 +196,7 @@ class ItemSpec:
     retro_mult: float = 1.0
     wear_mult: float = 1.0
     ai_reason: str = "Словари"
+    source_kind: str = ""       # dict | memory | ai | manual | field
     slots: int = 0
     production_cost: float = 0.0
     size_label: str = ""

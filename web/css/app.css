@@ -336,6 +336,12 @@ input[type=range]:active::-webkit-slider-thumb { transform: scale(1.05); }
 .c-new b { font-size: 13.5px; font-weight: 650; color: var(--green); }
 .c-rub { text-align: right; color: var(--muted); font-size: 11.5px; font-variant-numeric: tabular-nums; }
 .c-src { font-size: 10.5px; color: var(--dim); }
+.src-b { font-style: normal; font-weight: 600; font-size: 9.5px; padding: 0 4px; border-radius: 4px; margin-right: 4px; border: 1px solid transparent; }
+.src-b-dict { color: #9aa4b2; border-color: #3a4150; }
+.src-b-memory { color: #7dd3fc; border-color: #0e7490; }
+.src-b-ai { color: #c4b5fd; border-color: #7c3aed; background: rgba(124, 58, 237, .12); }
+.src-b-manual { color: #fbbf24; border-color: #b45309; }
+.src-b-field { color: #86efac; border-color: #15803d; }
 .c-country { display: flex; align-items: center; gap: 6px; font-size: 12px; cursor: pointer; border-radius: 7px; padding: 4px 6px; transition: background .18s; }
 .c-country:hover { background: rgba(99, 102, 241, .16); }
 .c-country em { font-style: normal; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

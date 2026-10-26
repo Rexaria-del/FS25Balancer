@@ -595,6 +595,20 @@ async function aiOneClick(model) {
   toast("info", "Модель " + model + ": загрузка/запуск в фоне");
 }
 
+/* ── источник классификации: словари / память брендов / локальный ИИ ── */
+function srcKind(it) {
+  if (it.price_source || it.manual_price != null) return "manual";
+  const k = it.source_kind || "";
+  return (k === "ai" || k === "memory" || k === "field") ? k : "dict";
+}
+function srcBadge(it) {
+  const k = srcKind(it);
+  const ru = { dict: "Словари", memory: "Память", ai: "ИИ", manual: "Вручную", field: "Поле" }[k];
+  const en = { dict: "Dicts", memory: "Memory", ai: "AI", manual: "Manual", field: "Field" }[k];
+  return "<i class=\"src-b src-b-" + k + "\" data-ru=\"" + esc(ru) + "\" data-en=\"" + esc(en) +
+         "\" title=\"" + esc("Как определены страна/ретро") + "\">" + esc(ru) + "</i> ";
+}
+
 /* ── разбор цены без клика: «= итог (база × страна × ретро)» прямо в таблице ── */
 function chainParts(it) {
   const ch = it.price_chain || [];
@@ -672,6 +686,7 @@ function matches(it) {
   if (S.filter === "review" && !it.needs_review) return false;
   if (S.filter === "manual" && !(it.price_source || it.manual_price != null)) return false;
   if (S.filter === "cheat" && !it.is_cheat) return false;
+  if (S.filter === "ai" && srcKind(it) !== "ai") return false;
   if (S.filter === "placeable" && S.subgroups.size && !S.subgroups.has(it.subgroup || "other")) return false;
   if (S.query) {
     const q = S.query.toLowerCase();
@@ -741,7 +756,7 @@ function rowEl(it) {
     <span class="c-base" title="${esc(uiText("Цена по характеристикам до коэффициентов страны и ретро", "Price from specifications before country and retro multipliers"))}">${fmt(toRubles(it.base_price))}</span>
     ${priceCell(it)}
     <span class="c-rub">${fmt(it.new_price_rub)}</span>
-    <span class="c-src" data-price="${esc(it.unique_key)}" title="${chainTitle(it)}\nклик — своя цена и разбор">${chainLine(it)}</span>`;
+    <span class="c-src" data-price="${esc(it.unique_key)}" title="${chainTitle(it)}\nклик — своя цена и разбор">${srcBadge(it)}${chainLine(it)}</span>`;
   return tr;
 }
 const fmt1 = v => Number(v || 0).toFixed(1).replace(/\.0$/, "");
@@ -1627,6 +1642,12 @@ window.addEventListener("scroll", retourPlace, true);
 
 /* ── история обновлений ── */
 const CHANGELOG = [
+  { v: "16.1", title: "Reliable apply & source badges", date: "2026-10-26", items: [
+      "WinError 183 исправлен: legacy-бэкапы v13 мигрируют автоматически",
+      "Колонка «Источник»: словари, память, ИИ или вручную — видно без тултипа",
+      "Фильтр «🤖 ИИ» по позициям, классифицированным локальным ИИ",
+      "Исправлен файловый фильтр импорта прайс-бандла",
+    ]},
   { v: "16.0", title: "Balance & sharing", date: "2026-10-26", items: [
     "RU / EN: переключение интерфейса, подсказок и обучения",
     "Фильтры категорий сканирования и подгрупп зданий",
