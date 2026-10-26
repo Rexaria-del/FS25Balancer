@@ -498,6 +498,7 @@ class BalancerService:
                 "title": s.title, "type": s.item_type, "price": int(s.new_price),
                 "retro": bool(s.is_retro), "country": s.country,
                 "goods": int(s.goods_count or 0), "old_price": int(s.old_price or 0),
+                "src": s.price_source or "manual",
                 "patch": dict(get_spec_patches().get(s.unique_key, {})),
             })
         return {"format": "fs25balancer-bundle", "version": 1,
@@ -564,7 +565,7 @@ class BalancerService:
             if p > 0:
                 self.overrides[s.unique_key] = p
                 s.manual_price = p
-                s.price_source = "manual"
+                s.price_source = str(it.get("src") or "manual")
             if it.get("country") and str(it.get("country")) in _known():
                 s.country = str(it["country"])
                 info = _country_info(s.country)
@@ -596,8 +597,14 @@ class BalancerService:
     def clear_bundle(self) -> Dict[str, Any]:
         self.bundle = {}
         storage.save_json(self.BUNDLE_FILE, {})
-        self.overrides = {}
-        return {"ok": True}
+        with self._lock:
+            self.overrides = {}
+            for s in self.specs:
+                if s.manual_price is not None:
+                    s.manual_price = None
+                    s.price_source = ""
+                    self.reprice_item(s)
+        return {"ok": True, "reset": len(self.specs)}
 
     def relabel_items(self) -> None:
         """Пересобирает подписи и разбор цены при смене языка — без нового сканирования."""

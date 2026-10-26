@@ -1,35 +1,3 @@
-/* FS25 Balancer v15 — UI-слой (vanilla JS, без CDN: работает офлайн в exe) */
-"use strict";
-
-const API_PROXY = "__FS25_API__";
-const S = {
-  boot: null, items: new Map(), order: [],
-  filter: "all", query: "", busy: false,
-  brandTab: null, tourStep: -1, probed: false,
-};
-
-/* ── мост к Python ── */
-function api() {
-  if (window.pywebview && window.pywebview.api) return window.pywebview.api;
-  return null;
-}
-async function call(name, ...args) {
-  const a = api();
-  // До завершения boot мост может отсутствовать первые сотни мс — молча ретраимся,
-  // тостим только когда UI уже живёт, а вызов всё равно не проходит.
-  if (!a || typeof a[name] !== "function") {
-    if (S.boot) toast("err", "Мост Python ещё не готов");
-    return null;
-  }
-  try {
-    return await a[name](...args);
-  } catch (e) {
-    console.error(name, e);
-    toast("err", "Ошибка вызова: " + name);
-    return null;
-  }
-}
-
 /* ── утилиты ── */
 const $ = (sel, root) => (root || document).querySelector(sel);
 const $$ = (sel, root) => Array.from((root || document).querySelectorAll(sel));
@@ -272,6 +240,7 @@ async function bootInner() {
   (b.items || []).forEach(putItem);
   renderTable();
 
+  renderBundleInfo();
   setTimeout(async () => {
     await introWait();
     $("#boot").classList.add("is-out");
@@ -569,6 +538,79 @@ async function aiOneClick(model) {
   toast("info", "Модель " + model + ": загрузка/запуск в фоне");
 }
 
+/* ── разбор цены без клика: «= итог (база × страна × ретро)» прямо в таблице ── */
+function chainParts(it) {
+  const ch = it.price_chain || [];
+  const out = [];
+  let base = "";
+  for (const s of ch) {
+    const op = String(s.effect || "");
+    if (op === "+base") base = fmt(Math.round(s.running || 0)) + " база";
+    else if (op === "x") {
+      const lab = String(s.label || "").replace(/^[КК]оэф\.\s*/i, "").slice(0, 15);
+      out.push("×" + fmt2(s.value) + (lab ? " " + lab : ""));
+    }
+  }
+  if (!out.length) {
+    if (Math.abs(Number(it.country_mult || 1) - 1) > 1e-6) out.push("×" + fmt2(it.country_mult) + " " + (it.country || ""));
+    if (Math.abs(Number(it.retro_mult || 1) - 1) > 1e-6) out.push("×" + fmt2(it.retro_mult) + " ретро");
+  }
+  if (!base) base = fmt(it.base_price) + " база";
+  return { base: base, mult: out };
+}
+
+function chainLine(it) {
+  const { base, mult } = chainParts(it);
+  const tail = mult.length ? " " + mult.join(" ") : "";
+  return esc("= " + fmt(it.new_price) + "  (" + base + tail + ")");
+}
+
+function chainTitle(it) {
+  const ch = it.price_chain || [];
+  if (!ch.length) return esc(it.ai_reason || "");
+  const lines = ch.map(s => {
+    const op = String(s.effect || "");
+    const v = op === "x" ? "×" + fmt2(s.value)
+      : op === "=>" ? "→" + fmt(Math.round(s.running || 0))
+      : op === "=" ? "= " + fmt(Math.round(s.running || 0))
+      : fmt(Math.round(s.value || 0));
+    return "• " + String(s.label || "") + (s.detail ? " (" + s.detail + ")" : "") + ":  " + v;
+  });
+  return esc(lines.join("\n") + "\n—" + (it.ai_reason || ""));
+}
+
+/* FS25 Balancer v15 — UI-слой (vanilla JS, без CDN: работает офлайн в exe) */
+"use strict";
+
+const API_PROXY = "__FS25_API__";
+const S = {
+  boot: null, items: new Map(), order: [],
+  filter: "all", query: "", busy: false,
+  brandTab: null, tourStep: -1, probed: false,
+};
+
+/* ── мост к Python ── */
+function api() {
+  if (window.pywebview && window.pywebview.api) return window.pywebview.api;
+  return null;
+}
+async function call(name, ...args) {
+  const a = api();
+  // До завершения boot мост может отсутствовать первые сотни мс — молча ретраимся,
+  // тостим только когда UI уже живёт, а вызов всё равно не проходит.
+  if (!a || typeof a[name] !== "function") {
+    if (S.boot) toast("err", "Мост Python ещё не готов");
+    return null;
+  }
+  try {
+    return await a[name](...args);
+  } catch (e) {
+    console.error(name, e);
+    toast("err", "Ошибка вызова: " + name);
+    return null;
+  }
+}
+
 /* ── таблица ── */
 function matches(it) {
   if (S.filter === "vehicle" && it.item_type !== "vehicle") return false;
@@ -576,6 +618,7 @@ function matches(it) {
   if (S.filter === "field" && it.item_type !== "field") return false;
   if (S.filter === "retro" && !it.is_retro) return false;
   if (S.filter === "review" && !it.needs_review) return false;
+  if (S.filter === "manual" && !(it.price_source || it.manual_price != null)) return false;
   if (S.query) {
     const q = S.query.toLowerCase();
     const hay = `${it.title} ${it.brand} ${it.mod_name} ${it.country} ${it.category_label}`.toLowerCase();
@@ -643,323 +686,10 @@ function rowEl(it) {
     <span class="c-base">${fmt(it.base_price)}</span>
     ${priceCell(it)}
     <span class="c-rub">${fmt(it.new_price_rub)}</span>
-    <span class="c-src" title="${esc(it.ai_reason)} · kC=${fmt2(it.country_mult)} kR=${fmt2(it.retro_mult)}">${esc(it.ai_reason)}</span>`;
+    <span class="c-src" data-price="${esc(it.unique_key)}" title="${chainTitle(it)}\nклик — своя цена и разбор">${chainLine(it)}</span>`;
   return tr;
 }
 const fmt1 = v => Number(v || 0).toFixed(1).replace(/\.0$/, "");
-function fmtBytes(n) { n = Number(n) || 0;
-  if (n >= 2 ** 30) return (n / 2 ** 30).toFixed(2) + " ГБ";
-  if (n >= 2 ** 20) return (n / 2 ** 20).toFixed(1) + " МБ";
-  return Math.round(n / 1024) + " КБ"; }
-const fmt2 = v => Number(v || 0).toFixed(2);
-
-/* делегирование кликов таблицы */
-$("#tbody").addEventListener("click", e => {
-  const sw = e.target.closest("[data-retro]");
-  if (sw) { toggleRetro(sw.dataset.retro, !sw.classList.contains("is-on")); return; }
-  const pb = e.target.closest("[data-price]");
-  if (pb) { openPriceEditor(pb.dataset.price, pb); return; }
-  const cb = e.target.closest("[data-configs]");
-  if (cb) { openPriceMenu(cb.dataset.configs, cb); return; }
-  const rb = e.target.closest("[data-auto]");
-  if (rb) { resetAutoPrice(rb.dataset.auto); return; }
-  const sp = e.target.closest("[data-specs]");
-  if (sp) { openTtx(sp.dataset.specs); return; }
-  const cc = e.target.closest("[data-country]");
-  if (cc) { openCountryPicker(cc.dataset.country, cc); return; }
-});
-$("#tbody").addEventListener("dblclick", e => {
-  const cc = e.target.closest("[data-country]");
-  if (cc) { openCountryPicker(cc.dataset.country, cc); return; }
-  const tr = e.target.closest(".trow");
-  if (tr) openTtx(tr.dataset.key);
-});
-
-async function toggleRetro(key, on) {
-  if (S.boot && S.boot.config.retro_enabled === false) return toast("warn", "Ретро-режим выключен в настройках");
-  const r = await call("set_retro", key, on);
-  if (!r || !r.ok) { toast("err", (r && r.error) || "Не удалось переключить ретро"); return; }
-  S.items.set(key, r.item);
-  patchRow(r.item);
-  updateStats();
-}
-
-async function setCountry(key, country) {
-  const r = await call("set_country", key, country);
-  if (!r || !r.ok) { toast("err", (r && r.error) || "Ошибка смены страны"); return; }
-  S.items.set(key, r.item);
-  patchRow(r.item);
-  toast("ok", `${r.item.title} → ${r.item.country} (коэф. ${fmt2(r.item.country_mult)})`);
-}
-
-function patchRow(it, flash) {
-  const tr = $(`.trow[data-key="${CSS.escape(it.unique_key)}"]`);
-  if (!tr || !matches(it)) { renderTable(); return; }
-  const fresh = rowEl(it);
-  tr.className = fresh.className + (flash ? " price-flash" : "");
-  tr.innerHTML = fresh.innerHTML;
-  if (flash) setTimeout(() => tr.classList.remove("price-flash"), 760);
-}
-
-/* ── выбор страны (анимированный поповер) ── */
-let popKey = null;
-function openCountryPicker(key, anchor) {
-  closePop();
-  popKey = key;
-  const pop = $("#pop");
-  const sel = (S.boot.config.selected_countries || []).length
-    ? S.boot.config.selected_countries : S.boot.countries.map(c => c.name);
-  const rows = S.boot.countries.filter(c => sel.includes(c.name));
-  pop.querySelector(".pop-list").innerHTML = rows.map(c =>
-    `<div class="po" data-c="${esc(c.name)}"><span class="fl">${c.flag}</span><span>${esc(c.name)}</span>
-     <span class="k">${fmt2(c.mult != null ? c.mult : c.k)}</span></div>`).join("");
-  pop.hidden = false;
-  positionPop(pop, anchor);
-  $$("#pop .po").forEach(el => el.onclick = () => { setCountry(key, el.dataset.c); closePop(); });
-  const inp = $("#popSearch");
-  inp.value = "";
-  inp.oninput = () => {
-    const q = inp.value.toLowerCase();
-    $$("#pop .po").forEach(el => {
-      el.style.display = el.textContent.toLowerCase().includes(q) ? "" : "none";
-    });
-  };
-  inp.onkeydown = e => { if (e.key === "Escape") closePop(); };
-  setTimeout(() => inp.focus(), 30);
-}
-
-function positionPop(pop, anchor, width) {
-  const r = anchor.getBoundingClientRect();
-  const w = Math.min(Math.max(Number(width) || 240, 180), 420);
-  const h = Math.min(420, pop.scrollHeight || 320);
-  let top = r.bottom + 6;
-  if (top + h > innerHeight - 8) top = Math.max(8, r.top - h - 6);
-  pop.style.top = top + "px";
-  pop.style.left = Math.min(Math.max(8, r.left - 60), innerWidth - w - 8) + "px";
-  pop.style.width = w + "px";
-}
-function closePop() { $("#pop").hidden = true; popKey = null; }
-document.addEventListener("click", e => {
-  if (!e.target.closest("#aiModelDl") && !e.target.closest(".dl-cur")) { const dl = $("#aiModelDl"); if (dl) dl.hidden = true; }
-  if (!popKey) return;
-  if (e.target.closest("#pop") || e.target.closest("[data-country]")) return;
-  closePop();
-});
-window.addEventListener("resize", () => { closePop(); closeMenu(); closePriceEditor(); });
-window.addEventListener("scroll", () => { closePop(); closeMenu(); closePriceEditor(); }, true);
-
-/* ── меню комплектаций (клик по цене) ── */
-let menuKey = null;
-let menuAnchor = null;
-async function openPriceMenu(key, anchor) {
-  const it = S.items.get(key);
-  if (!it) return;
-  closeMenu();
-  menuKey = key;
-  menuAnchor = anchor;
-  const menu = $("#motorPop");
-  let html = `<div class="ctx-h">${it.type_icon} ${esc(it.title)} — комплектации</div>`;
-  if (it.motor_prices && it.motor_prices.length) {
-    html += it.motor_prices.map(m =>
-      `<div class="ctx-i${m.total === it.manual_price ? " is-on" : ""}" data-motor="${m.index}">
-         <span>${esc(m.label)} · ${fmt(m.hp)} л.с.</span><b>${fmt(m.total)}</b></div>`
-    ).join("");
-    html += `<div class="ctx-sep"></div>`;
-  }
-  html += `<div class="ctx-i" data-price-item="1"><span>✎ Задать свою цену</span></div>
-           <div class="ctx-i" data-edit="1"><span>⚙ Править ТТХ и разбор цены</span></div>`;
-  menu.innerHTML = html;
-  menu.hidden = false;
-  positionPop(menu, anchor);
-  $$("#motorPop [data-motor]").forEach(el => el.onclick = () => {
-    const idx = Number(el.dataset.motor);
-    const m = it.motor_prices.find(x => x.index === idx);
-    applyMotorPrice(key, m);
-    closeMenu();
-  });
-  const ed = $("#motorPop [data-edit]");
-  if (ed) ed.onclick = () => { closeMenu(); openTtx(key); };
-  const pe = $("#motorPop [data-price-item]");
-  if (pe) pe.onclick = () => { closeMenu(); openPriceEditor(key, menuAnchor || pe); };
-}
-
-/* ── своя цена: поповер с вводом, дельтой к авторасчёту и возвратом ↺ ── */
-let ppKey = null;
-let ppAuto = null;
-
-function closePriceEditor() { const p = $("#pricePop"); if (p) p.hidden = true; ppKey = null; ppAuto = null; }
-
-async function openPriceEditor(key, anchor) {
-  const it = S.items.get(key);
-  if (!it) return;
-  closePriceEditor();
-  closeMenu();
-  ppKey = key;
-  const cfg = (S.boot && S.boot.config) || {};
-  const unit = cfg.write_direct_rubles === false ? "€" : "₽";
-  const pop = $("#pricePop");
-  pop.innerHTML = `
-    <div class="ctx-h">${it.type_icon} ${esc(it.title)} — конечная цена</div>
-    <div class="pp-row"><input type="number" id="ppInput" min="50" max="1000000000" step="100"
-      value="${it.new_price}" /><span class="pp-unit">${unit}</span></div>
-    <div class="pp-hint" id="ppHint">считаю авторасчёт…</div>
-    <div class="pp-btns">
-      <button class="btn btn-good sm" id="ppOk">✓ Сохранить</button>
-      <button class="btn btn-ghost sm" id="ppReset" ${it.price_source ? "" : "disabled"}>↺ Авторасчёт</button>
-      <button class="btn btn-ghost sm" id="ppNo">Отмена</button>
-    </div>
-    <div class="pp-note">Enter — сохранить, Esc — отмена. Своя цена не зависит от коэффициентов страны и ретро: в файл мода ляжет ровно это число.</div>`;
-  pop.hidden = false;
-  positionPop(pop, anchor, 292);
-  const inp = $("#ppInput"), hint = $("#ppHint"), ok = $("#ppOk");
-  const autoP = () => (ppAuto ? Number(ppAuto.auto_price) : Number(it.new_price));
-  function draw() {
-    const v = Number(inp.value);
-    const bad = !isFinite(v) || v < 50;
-    ok.disabled = bad;
-    hint.className = "pp-hint " + (bad ? "is-bad" : "is-ok");
-    if (bad) { hint.textContent = "Нужно целое число от 50"; return; }
-    const a = autoP(), d = v - a;
-    let txt = "Авторасчёт " + fmt(a) + " " + unit;
-    if (d) {
-      const pct = a > 0 ? Math.round(Math.abs(d) / a * 100) : 0;
-      txt += " · " + (d > 0 ? "+" : "−") + fmt(Math.abs(d)) + " (" + pct + "%)";
-    } else txt += " · совпадает";
-    if (unit === "€") txt += " · ≈ " + fmt(Math.round(v * (Number(cfg.exchange_rate) || 0))) + " ₽";
-    hint.textContent = txt;
-  }
-  inp.oninput = draw;
-  inp.onkeydown = e => {
-    if (e.key === "Enter") { e.preventDefault(); saveManualPrice(); }
-    else if (e.key === "Escape") { e.preventDefault(); closePriceEditor(); }
-  };
-  ok.onclick = saveManualPrice;
-  $("#ppReset").onclick = () => resetAutoPrice(key);
-  $("#ppNo").onclick = closePriceEditor;
-  draw();
-  setTimeout(() => { inp.focus(); inp.select(); }, 30);
-  const r = await call("breakdown", key);
-  if (r && r.ok && ppKey === key) { ppAuto = r.breakdown; draw(); }
-}
-
-async function saveManualPrice() {
-  if (!ppKey) return;
-  const key = ppKey;
-  const v = Number($("#ppInput").value);
-  if (!isFinite(v) || v < 50) return toast("err", "Цена должна быть числом от 50");
-  const r = await call("set_price", key, Math.round(v), "manual");
-  if (!r || !r.ok) return toast("err", (r && r.error) || "Не удалось сохранить цену");
-  S.items.set(key, r.item);
-  patchRow(r.item, true);
-  updateStats();
-  closePriceEditor();
-  toast("ok", "Своя цена " + fmt(r.item.new_price) + " · ↺ в строке вернёт авторасчёт");
-}
-
-async function resetAutoPrice(key) {
-  const r = await call("clear_price", key);
-  if (!r || !r.ok) return toast("err", (r && r.error) || "Не удалось вернуть авторасчёт");
-  S.items.set(key, r.item);
-  patchRow(r.item, true);
-  updateStats();
-  closePriceEditor();
-  toast("ok", "Авторасчёт возвращён: " + fmt(r.item.new_price));
-}
-function closeMenu() { $("#motorPop").hidden = true; menuKey = null; }
-document.addEventListener("click", e => {
-  if (menuKey && !e.target.closest("#motorPop") && !e.target.closest("[data-configs]")
-      && !e.target.closest("[data-price]")) closeMenu();
-  if (ppKey && !e.target.closest("#pricePop") && !e.target.closest("[data-price]")) closePriceEditor();
-});
-
-async function applyMotorPrice(key, m) {
-  const r = await call("set_price", key, m.total, "motor");
-  if (!r || !r.ok) return toast("err", (r && r.error) || "Не удалось выбрать комплектацию");
-  S.items.set(key, r.item);
-  patchRow(r.item, true);
-  updateStats();
-  toast("ok", `Комплектация «${m.label}» · ${fmt(r.item.new_price)} (${fmt(m.hp)} л.с.)`);
-}
-
-/* ── модалка ТТХ: поля только того класса, что есть в XML + разбор цены ── */
-const SPEC_META = {
-  hp: { label: "Мощность двигателя", unit: "л.с.", min: 0, max: 3000, step: 1 },
-  max_speed: { label: "Максимальная скорость", unit: "км/ч", min: 0, max: 200, step: 1 },
-  capacity: { label: "Вместимость", unit: "л", min: 0, max: 500000, step: 50 },
-  working_width: { label: "Ширина захвата", unit: "м", min: 0, max: 60, step: 0.1 },
-  needed_hp: { label: "Требуемая мощность", unit: "л.с.", min: 0, max: 3000, step: 1 },
-  production_cost: { label: "Стоимость производства", unit: "за час", min: 0, max: 100000, step: 10 },
-  slots: { label: "Места (слоты/стенды)", unit: "шт", min: 0, max: 512, step: 1, readonly: true },
-};
-let ttxKey = null;
-let ttxTimer = 0;
-
-function specValue(it, k) {
-  const map = { hp: it.hp, max_speed: it.max_speed, capacity: it.capacity,
-                working_width: it.working_width, needed_hp: it.needed_hp,
-                production_cost: it.production_cost, slots: it.slots };
-  const v = Number(map[k] || 0);
-  return isFinite(v) ? v : 0;
-}
-
-function specForm(it) {
-  const fields = (it.spec_fields || []).filter(k => SPEC_META[k]);
-  const patch = it.spec_patch || {};
-  if (!fields.length) {
-    return '<div class="dim sm">В файле этой позиции нет редактируемых характеристик — доступна своя цена.</div>';
-  }
-  return `<div class="ctx-h" style="padding-left:0">Характеристики · только те, что есть в этом файле мода</div>
-    <div class="spec-grid">` + fields.map(k => {
-      const m = SPEC_META[k];
-      const stored = patch[k] != null ? Number(patch[k]) : null;
-      const v = stored != null ? stored : specValue(it, k);
-      const shown = m.step === 0.1 ? v.toFixed(1) : String(Math.round(v));
-      return `<div class="spec-r${stored != null ? " is-patched" : ""}">
-        <label>${m.label}${stored != null ? ' <em class="pbadge">изменено</em>' : ""}</label>
-        <input type="number" data-spec="${k}" min="${m.min}" max="${m.max}" step="${m.step}" value="${shown}"${m.readonly ? " disabled" : ""}>
-        <span class="unit">${m.unit}</span>
-      </div>`;
-    }).join("") + `</div>
-    <div class="dim sm">Правки ложатся в XML мода при «Применить» (с бэкапом в _backup_original_mods). До этого — только предпросмотр.</div>`;
-}
-
-function motorsForm(it) {
-  if (!it.motors || !it.motors.length) return "";
-  return `<div class="ctx-h" style="padding-left:0">Комплектации двигателя</div>
-    <div class="mrow head"><label>Название</label><label>Л.С.</label><label>Наценка</label></div>` +
-    it.motors.map(m => `
-      <div class="mrow">
-        <input type="text" data-mlabel="${m.index}" value="${esc(m.label)}">
-        <input type="number" data-mhp="${m.index}" min="0" max="2000" step="1" value="${Math.round(m.hp || 0)}">
-        <input type="number" data-mprice="${m.index}" min="0" step="100" value="${Math.round(m.price_delta || 0)}">
-      </div>`).join("");
-}
-
-function priceRow(it) {
-  const now = it.price_source === "motor" ? "выбрана комплектация"
-    : (it.manual_price != null ? "задана вручную" : "авторасчёт");
-  return `<div class="mrow">
-      <label title="Сейчас: ${now}">Своя цена · ${now}</label>
-      <input type="number" id="mPrice" min="50" step="100" value="${it.manual_price != null ? it.manual_price : 0}">
-      <span class="dim"><button class="linkish" id="mPriceAuto" type="button">↺ 0 = авторасчёт</button></span></div>`;
-}
-
-function fieldForm(it) {
-  return `${it.needs_review ? `<div class="mnote">⚠️ ${esc(it.ai_reason)} — подтверди или впиши значения вручную.</div>` : ""}
-    <div class="spec-grid">
-      <div class="spec-r"><label>Площадь</label>
-        <input type="number" data-spec="area" id="fArea" min="0" max="5000" step="0.1" value="${it.field_area || 0}">
-        <span class="unit">га</span></div>
-      <div class="spec-r"><label>Дистанция до магазина</label>
-        <input type="number" data-spec="distance" id="fDist" min="-1" max="50" step="0.1" value="${it.field_distance}">
-        <span class="unit">км · -1 = неизвестно</span></div>
-    </div>
-    <div class="mrow">
-      <label>Своя цена · ${it.price_source === "manual" ? "задана вручную" : "авторасчёт"}</label>
-      <input type="number" id="mPrice" min="50" step="100" value="${it.manual_price != null ? it.manual_price : 0}">
-      <span class="dim">0 = авторасчёт</span></div>
-    <div class="dim sm">Координаты поля: ${it.field_coord ? it.field_coord.map(n => Math.round(n)).join(" / ") : "не найдены"}</div>`;
-}
 
 function openTtx(key) {
   const it = S.items.get(key);
@@ -1141,7 +871,73 @@ function updateStats() {
   const shown = $$(".trow").length;
   $("#shownCount").textContent = `${shown} из ${all.length} строк`;
   $("#empty").hidden = shown > 0;
+  const manual = all.filter(i => i.price_source || i.manual_price != null).length;
+  const cm = $("#chipManual");
+  if (cm) cm.innerHTML = "✎ Свои цены · " + manual + (manual ? ' <button class="chip-x" id="clearManualAll" title="Снять ВСЕ ручные цены и вернуть авторасчёт">↺</button>' : "");
+  const cma = $("#clearManualAll");
+  if (cma) cma.onclick = clearAllManual;
 }
+
+async function clearAllManual() {
+  const all = S.order.map(k => S.items.get(k)).filter(it => it && (it.price_source || it.manual_price != null));
+  if (!all.length) return;
+  if (!confirm("Вернуть авторасчёт для " + all.length + " позиций со своей ценой?")) return;
+  for (const it of all) {
+    const r = await call("clear_price", it.unique_key);
+    if (r && r.ok) { S.items.set(it.unique_key, r.item); patchRow(r.item); }
+  }
+  updateStats();
+  toast("ok", "Авторасчёт возвращён для " + all.length + " позиций");
+}
+
+/* ── прайс-бандл: экспорт/импорт цен вместо пересылки 20 ГБ модпака ── */
+async function renderBundleInfo() {
+  const el = $("#bundleInfo");
+  if (!el) return;
+  const st = await call("bundle_status");
+  if (!st || !st.loaded) {
+    el.className = "bundle-info";
+    el.innerHTML = "Чужой прайс-бандл не загружен. «Экспорт цен» создаёт файл, который можно " +
+      "отправить другу вместо всего модпака — у него кнопки «Импорт цен» хватит.";
+    return;
+  }
+  el.className = "bundle-info has";
+  el.innerHTML = `Загружен бандл: <b>${Number(st.count) || 0}</b> позиций` +
+    (st.created ? ` от ${esc(st.created)}` : "") +
+    ` <button class="linkish" id="btnBundleDrop">↺ забыть</button>`;
+  $("#btnBundleDrop").onclick = async () => {
+    if (!confirm("Забыть импортированный бандл?\nСнимутся и все ручные цены этого сеанса — позиции вернутся к авторасчёту.")) return;
+    const r = await call("clear_bundle");
+    if (!r || !r.ok) return toast("err", (r && r.error) || "Не удалось забыть бандл");
+    toast("info", "Бандл забыт, ручные цены сняты");
+    renderBundleInfo();
+  };
+}
+
+$("#btnExport").onclick = async () => {
+  const r = await call("export_prices", "");
+  if (!r) return;
+  if (!r.ok) { if (r.error) toast("err", r.error); return; }
+  const kb = Math.max(1, Math.round((Number(r.size) || 0) / 1024));
+  toast("ok", `Файл цен: ${r.items} позиций, ${kb} КБ. Открываю папку — отправь этот JSON другу.`, 8000);
+  log("Экспорт цен: " + (r.path || ""), "ok");
+  call("reveal_path", r.path);
+};
+
+$("#btnImport").onclick = async () => {
+  const r = await call("import_prices", "");
+  if (!r) return;
+  if (!r.ok) { if (r.error) toast("err", r.error); return; }
+  const okN = Number(r.matched) || 0, miss = Number(r.missing) || 0;
+  toast(okN ? "ok" : "warn",
+    `Бандл прочитан: ${r.items} позиций · совпало ${okN}` + (miss ? ` · не найдено ${miss}` : ""), 8000);
+  log(`Импорт цен: совпало ${okN} из ${r.items}`, okN ? "ok" : "warn");
+  if (r.config) {
+    S.boot.config = Object.assign(S.boot.config || {}, r.config);
+    applyConfigToUI(r.config);
+  }
+  renderBundleInfo();
+};
 
 /* ── мультиселект стран ── */
 let selSet = new Set();
@@ -1624,12 +1420,14 @@ function ensureHole() {
 }
 
 function maybeTour() {
-  // Обучение обязательно при каждом запуске, пока пользователь не поставил
-  // галочку "больше не показывать" (fs25_tour_done больше не используется)
+  // Обучение обязательно при каждом запуске, пока не стоит галочка
+  // «больше не показывать». Старт — после ухода заставки и появления shell:
+  // до этого все rect'ы считаются внутри animation: rise и рамка летит не туда.
   try { localStorage.removeItem("fs25_tour_done"); } catch (e) {}
   let never = "";
   try { never = localStorage.getItem("fs25_tour_never"); } catch (e) {}
-  if (!never) startTour();
+  if (never) return;
+  setTimeout(() => requestAnimationFrame(() => requestAnimationFrame(startTour)), 560);
 }
 
 function startTour() {
@@ -1668,27 +1466,56 @@ function placeTour() {
   if (step.view && !$("#view-" + step.view).classList.contains("is-on")) showView(step.view);
   const el = $(step.sel);
   if (!el || !el.getBoundingClientRect().width) { S.tourStep++; return placeTour(); }
-  if (step.view) el.scrollIntoView({ block: "center" });
+  el.scrollIntoView({ block: "center", inline: "nearest" });
+  tourEl = el;
   $("#tourTitle").textContent = "Шаг " + (S.tourStep + 1) + " из " + TOUR.length + " · " + step.title;
   $("#tourText").textContent = step.text;
   $("#tourDots").innerHTML = TOUR.map((_, i) => `<i class="${i === S.tourStep ? "is-on" : ""}"></i>`).join("");
   $("#tourNext").textContent = S.tourStep === TOUR.length - 1 ? "Готово" : "Далее";
 
+  fitTour(el, hole, t);
+  // пересчёт после того, как отыграли переход вьюхи и скролл-анимации
+  requestAnimationFrame(() => requestAnimationFrame(() => fitTour(el, hole, t)));
+  clearTimeout(tourSettle);
+  tourSettle = setTimeout(() => { if (tourEl === el) fitTour(el, hole, t); }, 380);
+}
+
+let tourEl = null;
+let tourSettle = 0;
+let tourRaf = 0;
+
+function fitTour(el, hole, t) {
+  if (S.tourStep < 0 || !el || !el.isConnected) return;
   const r = el.getBoundingClientRect();
+  if (!r.width) return;
   hole.hidden = false;
   hole.style.left = (r.left - 6) + "px";
   hole.style.top = (r.top - 6) + "px";
   hole.style.width = (r.width + 12) + "px";
   hole.style.height = (r.height + 12) + "px";
-
   const tw = t.offsetWidth || 320, th = t.offsetHeight || 160;
   let top = r.bottom + 14, left = Math.min(Math.max(12, r.left), innerWidth - tw - 12);
   if (top + th > innerHeight - 12) top = Math.max(12, r.top - th - 14);
   t.style.left = left + "px"; t.style.top = top + "px";
 }
 
+function retourPlace() {
+  if (S.tourStep < 0 || tourRaf) return;
+  tourRaf = requestAnimationFrame(() => {
+    tourRaf = 0;
+    const step = TOUR[S.tourStep];
+    if (!step) return;
+    const el = tourEl && tourEl.isConnected ? tourEl : $(step.sel);
+    if (!el) return;
+    tourEl = el;
+    fitTour(el, ensureHole(), $("#tour"));
+  });
+}
+
 function endTour() {
   S.tourStep = -1;
+  tourEl = null;
+  clearTimeout(tourSettle);
   const t = $("#tour"); if (t) t.hidden = true;
   const hole = ensureHole(); hole.hidden = true;
   const cb = $("#tourNever");
@@ -1700,6 +1527,7 @@ function endTour() {
   }
 }
 window.addEventListener("resize", () => { if (S.tourStep >= 0) placeTour(); });
+window.addEventListener("scroll", retourPlace, true);
 
 /* ── история обновлений ── */
 const CHANGELOG = [

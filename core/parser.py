@@ -5,7 +5,7 @@
 Добавлено: ретро-множитель, несколько комплектаций двигателя, поля.
 """
 
-import hashlib, math, os, re, shutil, zipfile
+import hashlib, math, os, re, shutil, struct, time, zipfile
 import xml.etree.ElementTree as ET
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -615,11 +615,15 @@ def process_xml_root(root: ET.Element, rel_path: str, mod_name: str,
             delta_price = 0
             if write and mc.get("price") not in (None, "0"):
                 mc.set("price", "0")
+                changed = True
         else:
             delta_price = motor_price_for_delta(base_eur, delta, k_country, xm,
                                                 is_retro, cfg)
             if write:
-                mc.set("price", str(delta_price))
+                want = str(int(delta_price))
+                if mc.get("price") != want:      # не пишем то, что уже стоит в файле
+                    mc.set("price", want)
+                    changed = True
             cnt += 1
 
         motor_specs.append(MotorSpec(label=label, hp=hp_i, max_speed=spd_i,
@@ -646,6 +650,201 @@ def process_xml_root(root: ET.Element, rel_path: str, mod_name: str,
     )
 
 # ── Обработка мода (папка или zip) — алгоритм v13 ─────────────────────────────
+
+
+# ── Быстрая и безопасная запись в моды ────────────────────────────────────────
+# FS25-мод — это zip на сотни мегабайт, из которого меняется 2–3 маленьких XML.
+# Старый путь (read → inflate → deflate → write) жал все байты архива дважды.
+# Здесь неизменные записи копируются как ЕСТЕСТВЕННЫЕ СЖАТЫЕ БЛОКИ, архив остаётся
+# каноническим (по одной записи на файл), а проверка CRC выборок защищает от порчи.
+
+_RAW_VER = {zipfile.ZIP_STORED: 10, zipfile.ZIP_DEFLATED: 20,
+            zipfile.ZIP_BZIP2: 46, zipfile.ZIP_LZMA: 63}
+_LOCAL_SIG = 0x04034b50
+_ZIP64_MARK = 0xFFFFFFFF
+
+
+def _name_bytes(name: str) -> Tuple[bytes, int]:
+    """Кодировка имени ровно такая, как у zipfile в центральном каталоге:
+    ASCII без флага, иначе UTF-8 + флаг 0x800. Локальный заголовок обязан совпасть."""
+    try:
+        return name.encode("ascii"), 0
+    except UnicodeEncodeError:
+        return name.encode("utf-8"), 0x800
+
+
+def _raw_copyable(item: zipfile.ZipInfo) -> bool:
+    if item.flag_bits & 0x1:                                        # зашифровано
+        return False
+    if item.compress_type not in _RAW_VER:
+        return False
+    if max(int(item.file_size), int(item.compress_size)) > _ZIP64_MARK:
+        return False                                                # не влезет в 32-битные поля
+    return True
+
+
+def _entry_data_off(src_fh, item: zipfile.ZipInfo) -> int:
+    src_fh.seek(int(item.header_offset))
+    hdr = src_fh.read(30)
+    if len(hdr) != 30 or hdr[:4] != b"PK\x03\x04":
+        raise ValueError("битый локальный заголовок у " + item.filename)
+    nlen, elen = struct.unpack("<HH", hdr[26:30])
+    return int(item.header_offset) + 30 + nlen + elen
+
+
+def _copy_raw_entry(src_fh, out_fh, zo: zipfile.ZipFile, item: zipfile.ZipInfo) -> None:
+    data_off = _entry_data_off(src_fh, item)
+    nb, flags = _name_bytes(item.filename)
+    ver = _RAW_VER[item.compress_type]
+    dt = item.date_time
+    dosdate = (dt[0] - 1980) << 9 | dt[1] << 5 | dt[2]
+    dostime = dt[3] << 11 | dt[4] << 5 | (dt[5] // 2)
+    item.header_offset = out_fh.tell()
+    out_fh.write(struct.pack("<IHHHHHIIIHH", _LOCAL_SIG, ver, flags, item.compress_type,
+                             dostime, dosdate, item.CRC, item.compress_size,
+                             item.file_size, len(nb), 0))
+    out_fh.write(nb)
+    src_fh.seek(data_off)
+    left = int(item.compress_size)
+    while left > 0:
+        buf = src_fh.read(min(1 << 21, left))
+        if not buf:
+            raise IOError("запись обрезана: " + item.filename)
+        out_fh.write(buf)
+        left -= len(buf)
+    item.flag_bits = flags
+    item.extra = b""            # локальный и центральный extra должны совпадать
+    zo.filelist.append(item)
+    zo.NameToInfo[item.filename] = item
+    zo.start_dir = out_fh.tell()
+
+
+def _replace_with_retry(src: str, dst: str) -> None:
+    last: Optional[BaseException] = None
+    for i in range(4):
+        try:
+            os.replace(src, dst)
+            return
+        except OSError as e:                  # антивирус/игра могла держать файл
+            last = e
+            time.sleep(0.25 * (i + 1))
+    raise last if last else RuntimeError("os.replace не удался")
+
+
+def _atomic_write(path: str, data: bytes) -> None:
+    """Никогда не пишем в файл на месте: иначе жёсткая ссылка в бэкапе потеряет оригинал."""
+    tmp = path + ".tmp"
+    with open(tmp, "wb") as f:
+        f.write(data)
+    _replace_with_retry(tmp, path)
+
+
+def _backup_file(src: str, dst: str) -> None:
+    if os.path.exists(dst):
+        return
+    try:
+        os.link(src, dst)                     # NTFS: доли секунды и 0 байт лишнего места
+    except (OSError, NotImplementedError):
+        shutil.copy2(src, dst)
+
+
+def _backup_tree(src_dir: str, dst_dir: str) -> None:
+    if os.path.exists(dst_dir):
+        return
+    try:
+        for root, dirs, files in os.walk(src_dir):
+            rel = os.path.relpath(root, src_dir)
+            base = dst_dir if rel == "." else os.path.join(dst_dir, rel)
+            os.makedirs(base, exist_ok=True)
+            for fn in files:
+                s = os.path.join(root, fn)
+                d = os.path.join(base, fn)
+                if os.path.exists(d):
+                    continue
+                try:
+                    os.link(s, d)
+                except (OSError, NotImplementedError):
+                    shutil.copy2(s, d)
+    except Exception:
+        shutil.rmtree(dst_dir, ignore_errors=True)
+        shutil.copytree(src_dir, dst_dir, dirs_exist_ok=True)
+
+
+def _verify_zip(tmp_path: str, src_path: str, modified: Dict[str, bytes]) -> None:
+    """Проверяет до замены: число записей, CRC/размеры и байты выборки."""
+    with zipfile.ZipFile(tmp_path) as zn, zipfile.ZipFile(src_path) as zs:
+        ni = zn.infolist()
+        if len(ni) != len(zs.infolist()):
+            raise ValueError("архив потерял файлы: %d вместо %d" % (len(ni), len(zs.infolist())))
+        for name, data in modified.items():
+            if zn.read(name) != data:
+                raise ValueError("расхождение содержимого " + name)
+        step = max(1, len(ni) // 8)
+        for it in ni[::step][:8]:
+            if it.filename in modified:
+                continue
+            ref = zs.getinfo(it.filename)
+            if it.CRC != ref.CRC or it.file_size != ref.file_size:
+                raise ValueError("расхождение метаданных " + it.filename)
+            if zn.read(it.filename) != zs.read(it.filename):
+                raise ValueError("расхождение байтов " + it.filename)
+
+
+def _rebuild_zip_fast(mod_path: str, modified: Dict[str, bytes]) -> None:
+    tmp = mod_path + ".tmp"
+    try:
+        with open(mod_path, "rb") as src_fh, open(tmp, "wb") as out_fh:
+            with zipfile.ZipFile(src_fh) as zi, zipfile.ZipFile(out_fh, "w") as zo:
+                zo._didModify = True
+                for item in zi.infolist():
+                    data = modified.get(item.filename)
+                    if data is not None:
+                        zo.writestr(item, data)          # маленький XML: жмём как обычно
+                    elif _raw_copyable(item):
+                        _copy_raw_entry(src_fh, out_fh, zo, item)
+                    else:
+                        zo.writestr(item, zi.read(item.filename))
+        _verify_zip(tmp, mod_path, modified)
+        _replace_with_retry(tmp, mod_path)
+    finally:
+        if os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+
+
+def _rebuild_zip_safe(mod_path: str, modified: Dict[str, bytes]) -> None:
+    """Гарантированный путь v15: полное пережатие. Запасной, если быстрый не понравился читателю."""
+    tmp = mod_path + ".tmp"
+    try:
+        with zipfile.ZipFile(mod_path, "r") as zi, \
+             zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zo:
+            for item in zi.infolist():
+                if item.filename in modified:
+                    zo.writestr(item, modified[item.filename])
+                else:
+                    zo.writestr(item, zi.read(item.filename))
+        _replace_with_retry(tmp, mod_path)
+    finally:
+        if os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+
+
+def rebuild_mod_zip(mod_path: str, modified: Dict[str, bytes]) -> str:
+    if not modified:
+        return "skip"
+    try:
+        _rebuild_zip_fast(mod_path, modified)
+        return "fast"
+    except Exception as e:
+        print("[zip] быстрый путь не удался (%s): пересборка пережатием" % e)
+        _rebuild_zip_safe(mod_path, modified)
+        return "safe"
+
 
 def process_mod(mod_path: str, cfg: BalancerConfig, apply: bool = False,
                 backup_dir: Optional[str] = None,
@@ -684,12 +883,11 @@ def process_mod(mod_path: str, cfg: BalancerConfig, apply: bool = False,
                     if apply:
                         # бэкап папки-мода перед первой записью (zip-ветка делает это ниже)
                         if not backed and cfg.create_backups and backup_dir:
-                            bp = os.path.join(backup_dir, mod_name)
                             os.makedirs(backup_dir, exist_ok=True)
-                            if not os.path.exists(bp):
-                                shutil.copytree(mod_path, bp, dirs_exist_ok=True)
+                            _backup_tree(mod_path, os.path.join(backup_dir, mod_name))
                             backed = True
-                        tree.write(fp, encoding="utf-8", xml_declaration=True)
+                        _atomic_write(fp, ET.tostring(tree.getroot(), encoding="utf-8",
+                                                      xml_declaration=True))
                     results.append(spec)
             except Exception:
                 continue
@@ -723,7 +921,7 @@ def process_mod(mod_path: str, cfg: BalancerConfig, apply: bool = False,
                                             overrides, write=apply)
                     if spec:
                         results.append(spec)
-                        if apply:
+                        if apply and spec.needs_write:
                             modified[real] = ET.tostring(root, encoding="utf-8",
                                                           xml_declaration=True)
                 except Exception:
@@ -732,19 +930,8 @@ def process_mod(mod_path: str, cfg: BalancerConfig, apply: bool = False,
         if apply and modified and not (stop and stop.is_set()):
             if cfg.create_backups and backup_dir:
                 os.makedirs(backup_dir, exist_ok=True)
-                bp = os.path.join(backup_dir, mod_name)
-                if not os.path.exists(bp):
-                    shutil.copy2(mod_path, bp)
-
-            tmp = mod_path + ".tmp"
-            with zipfile.ZipFile(mod_path, "r") as zi, \
-                 zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zo:
-                for item in zi.infolist():
-                    if item.filename in modified:
-                        zo.writestr(item, modified[item.filename])
-                    else:
-                        zo.writestr(item, zi.read(item.filename))
-            shutil.move(tmp, mod_path)
+                _backup_file(mod_path, os.path.join(backup_dir, mod_name))
+            rebuild_mod_zip(mod_path, modified)
 
     except Exception as e:
         print(f"[Skip] {mod_name}: {e}")

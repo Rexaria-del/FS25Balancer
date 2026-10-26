@@ -8,8 +8,9 @@ import webview
 from core import storage
 from core.ai_state import init_state
 from core.countries import countries_payload, GROUP_LABELS
+from core.i18n import lang_list, norm_lang, scan_target_label, subgroup_label
 from core.service import BalancerService, drain_events
-from core.models import SCAN_TARGET_LABELS, ScanTarget
+from core.models import (SCAN_CATEGORY_KEYS, SCAN_TARGET_LABELS, SUBGROUP_ORDER, ScanTarget)
 
 APP_VERSION_STR = "15.5"
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -105,7 +106,7 @@ class Api:
                 print('[exit] stop_ai_on_close=False — Ollama оставлена работать', flush=True)
                 return
             from core import ai as ai_mod
-            ok, _ = ai_mod.check_ollama()
+            ok, _ = ai_mod.check_ollama(force=True)
             if not ok:
                 exe = ai_mod.get_ollama_exe()
                 if not exe:
@@ -136,12 +137,18 @@ class Api:
             _cancel_dump()
             self.log("py boot() served start")
             threading.Thread(target=self._refresh_ai, daemon=True).start()
+            lang = norm_lang(self._svc.cfg.ui_lang)
             payload = {
                 "version": APP_VERSION_STR,
                 "data_dir": storage.data_dir(),
                 "default_mods_dir": self._svc.default_mods_dir(),
                 "scan_targets": [{"key": t.name, "label": SCAN_TARGET_LABELS[t]}
                                  for t in ScanTarget],
+                "scan_categories": [{"key": k, "label": scan_target_label(k, lang)}
+                                    for k in SCAN_CATEGORY_KEYS],
+                "subgroups": [{"key": k, "label": subgroup_label(k, lang)}
+                              for k in SUBGROUP_ORDER],
+                "langs": lang_list(),
                 "countries": countries_payload(),
                 "groups": dict(GROUP_LABELS),
                 "config": self._svc.config_payload(),
@@ -163,6 +170,18 @@ class Api:
 
     def poll(self) -> list:
         return drain_events()
+
+    def open_url(self, url) -> dict:
+        """Внешние ссылки (веб-поиск по позиции) открываем в браузере пользователя."""
+        u = str(url or "")
+        if not u.startswith(("https://", "http://")):
+            return {"ok": False, "error": "только http/https"}
+        try:
+            import webbrowser
+            webbrowser.open(u)
+            return {"ok": True}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
 
     # ── config ──
     def set_config(self, patch: dict) -> dict:
@@ -190,6 +209,64 @@ class Api:
             self._svc.save_settings()
             return {"ok": True, "path": path}
         return {"ok": False, "error": ""}
+
+    def choose_file(self) -> dict:
+        """Файл для импорта: друг прислал маленький JSON с ценами."""
+        if not self._win:
+            return {"ok": False, "error": "Окно не готово"}
+        try:
+            result = self._win.create_file_dialog(
+                webview.OPEN_DIALOG,
+                file_types=("Прайс-бандл FS25 (*.json)|*.json", "Любой файл (*.*)|*.*"))
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+        if not result:
+            return {"ok": False, "error": ""}
+        path = result[0] if isinstance(result, (list, tuple)) else str(result)
+        return {"ok": True, "path": path}
+
+    # ── прайс-бандл: передать цены без пересылки модов ──
+    def export_prices(self, dest_dir="") -> dict:
+        d = str(dest_dir or "").strip()
+        if not d:
+            picked = self.choose_dir()
+            if not picked.get("ok"):
+                return picked
+            d = picked["path"]
+        return self._svc.export_prices(d)
+
+    def import_prices(self, src_path="") -> dict:
+        p = str(src_path or "").strip()
+        if not p:
+            picked = self.choose_file()
+            if not picked.get("ok"):
+                return picked
+            p = picked["path"]
+        r = self._svc.import_prices(p)
+        if isinstance(r, dict) and r.get("ok"):
+            r["config"] = self._svc.config_payload()
+            r["bundle"] = self._svc.bundle_status()
+        return r
+
+    def bundle_status(self) -> dict:
+        return self._svc.bundle_status()
+
+    def clear_bundle(self) -> dict:
+        r = self._svc.clear_bundle()
+        if isinstance(r, dict) and r.get("ok"):
+            r["config"] = self._svc.config_payload()
+        return r
+
+    def reveal_path(self, path) -> dict:
+        try:
+            p = os.path.normpath(str(path))
+            if os.path.isdir(p):
+                os.startfile(p)                       # noqa: S606 — открываем свою папку
+            else:
+                os.startfile(os.path.dirname(p))
+            return {"ok": True}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
 
     # ── scan / recalc / apply ──
     def start_scan(self, apply: bool = False) -> dict:
@@ -284,7 +361,7 @@ class Api:
             return
         try:
             from core.ai import check_ollama
-            ok, models = check_ollama()
+            ok, models = check_ollama(force=True)
             self._ai_cache = {"running": bool(ok), "models": list(models)}
         except Exception:
             self._ai_cache = {"running": False, "models": []}
@@ -313,7 +390,7 @@ class Api:
             if not ai_mod.start_ollama(prog):
                 emit("ai_done", {"msg": "Не удалось запустить службу Ollama"})
                 return
-            ok, models = ai_mod.check_ollama()
+            ok, models = ai_mod.check_ollama(force=True)
             if not any(str(model) in m for m in models):
                 prog(f"Скачиваю модель {model}…")
                 ai_mod.download_model(str(model), prog, prog)
@@ -466,6 +543,32 @@ def _setup_pywebview_log():
     return fh
 
 
+def _ensure_webview2() -> bool:
+    """WebView2 — движок интерфейса. Если его нет, спрашиваем и доустанавливаем сами."""
+    try:
+        from core import webview2
+    except Exception as e:
+        print("[webview2] модуль недоступен:", e, flush=True)
+        return True
+    try:
+        if webview2.is_installed():
+            return True
+        state = webview2.ensure(lambda m: print("[webview2]", m, flush=True))
+        if state == "installed":
+            webview2.relaunch()               # переродимся уже с рантаймом
+            return False
+        if state == "present":
+            return True
+        webview2._message(
+            "Без Microsoft Edge WebView2 интерфейс не запустится.\n"
+            "Установи его (https://developer.microsoft.com/microsoft-edge/webview2/) "
+            "и открой программу снова.", webview2.TXT_TITLE, yes_no=False)
+        return False
+    except Exception as e:
+        print("[webview2] проверка не удалась:", e, flush=True)
+        return True
+
+
 def main():
     # WebView2 иначе кэширует app.js/app.css между запусками — фиксы не долетают до пользователя
     os.environ.setdefault("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
@@ -473,6 +576,7 @@ def main():
     logf = _setup_crashlog()
     _setup_pywebview_log()
     print("[boot] crashlog:", logf.name, flush=True)
+    _ensure_webview2()
     init_state()
     print("[boot] state ready", flush=True)
     api = Api()

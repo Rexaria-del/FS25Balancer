@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """ИИ-слой: Ollama, классификация страны и ретро-статуса."""
 
-import json, os, re, shutil, subprocess, tempfile, time, urllib.request
+import json, os, re, shutil, subprocess, tempfile, threading, time, urllib.request
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from core.countries import ALL_COUNTRIES, country_info
@@ -76,7 +76,7 @@ def get_ollama_exe() -> Optional[str]:
     return p
 
 
-def check_ollama() -> Tuple[bool, List[str]]:
+def _check_ollama_raw() -> Tuple[bool, List[str]]:
     try:
         req = urllib.request.Request(f"{OLLAMA_HOST}/api/tags")
         with urllib.request.urlopen(req, timeout=1.0) as r:
@@ -86,6 +86,30 @@ def check_ollama() -> Tuple[bool, List[str]]:
     except Exception:
         pass
     return False, []
+
+
+OLLAMA_PROBE_TTL = 8.0
+_OLLAMA_PROBE: Dict[str, Any] = {"ts": 0.0, "ok": False, "models": []}
+_PROBE_LOCK = threading.Lock()
+
+
+def check_ollama(force: bool = False) -> Tuple[bool, List[str]]:
+    """Статус Ollama с коротким кэшем.
+
+    Без кэша КАЖДЫЙ незнакомый бренд при скане и применении дёргал /api/tags:
+    при выключенной службе это полный сетевой таймаут (до 1 с) на позицию.
+    UI-вызовы передают force=True, чтобы видеть свежие модель/статусы.
+    """
+    now = time.time()
+    with _PROBE_LOCK:
+        if not force and (now - float(_OLLAMA_PROBE["ts"])) < OLLAMA_PROBE_TTL:
+            return bool(_OLLAMA_PROBE["ok"]), list(_OLLAMA_PROBE["models"])
+    ok, models = _check_ollama_raw()
+    with _PROBE_LOCK:
+        _OLLAMA_PROBE["ts"] = time.time()
+        _OLLAMA_PROBE["ok"] = ok
+        _OLLAMA_PROBE["models"] = list(models)
+    return ok, models
 
 
 def installed_models_disk() -> List[str]:
@@ -123,7 +147,7 @@ def _no_window() -> Dict[str, Any]:
 
 
 def start_ollama(cb: Callable[[str], None]) -> bool:
-    ok, _ = check_ollama()
+    ok, _ = check_ollama(force=True)
     if ok:
         return True
     exe = get_ollama_exe()
@@ -135,7 +159,7 @@ def start_ollama(cb: Callable[[str], None]) -> bool:
         env["OLLAMA_NUM_PARALLEL"] = "2"
         subprocess.Popen([exe, "serve"], env=env, **_no_window())
         for _ in range(15):
-            ok, _ = check_ollama()
+            ok, _ = check_ollama(force=True)
             if ok:
                 return True
             time.sleep(1.0)
@@ -521,7 +545,7 @@ def ollama_ps() -> List[Dict[str, Any]]:
 
 def model_catalog(lang: str = "ru") -> Dict[str, Any]:
     lang = norm_lang(lang)
-    ok, models = check_ollama()
+    ok, models = check_ollama(force=True)
     if not models:
         models = installed_models_disk()
     rec, reason, hw = recommend_model(lang=lang)

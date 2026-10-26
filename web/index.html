@@ -112,6 +112,7 @@ setInterval(function () {
         <button class="chip" data-f="field">🌾 Поля</button>
         <button class="chip" data-f="retro">🕰 Ретро</button>
         <button class="chip" data-f="review">⚠️ Проверить</button>
+        <button class="chip" data-f="manual" id="chipManual" title="Только позиции, где цену задал ты">✎ Свои цены</button>
       </div>
       <div class="table-card">
         <div class="table-scroll">
@@ -157,8 +158,15 @@ setInterval(function () {
             <input type="range" id="retroK" min="0" max="100" step="1" value="65"></div>
           <div class="field"><label>Коэффициент износа ретро, % <span class="val" id="vWearK">15</span></label>
             <input type="range" id="wearK" min="0" max="100" step="1" value="15"></div>
-          <p class="dim sm">Ретро-тумблер в строке таблицы умножает цену на коэффициент цены, а износ — на коэффициент износа.</p>
         </div>
+        <div class="card" id="bundleCard">
+          <h3>📦 Цены для друга</h3>
+          <p class="dim sm">Модпак весит 20+ ГБ, а цены — десятки килобайт. «Экспорт» пишет один JSON: финальные цены, ретро-флаги, страны и ручные правки ТТХ. Друг жмёт «Импорт» у себя — и получает те же цифры, не перебирая моды заново.</p>
+          <div class="btnrow">
+            <button class="btn btn-ghost sm" id="btnExport">⬆ Экспорт цен</button>
+            <button class="btn btn-ghost sm" id="btnImport">⬇ Импорт цен</button>
+          </div>
+          <div class="bundle-info" id="bundleInfo">Свой прайс-бандл не загружен.</div>
       </div>
     </section>
 
