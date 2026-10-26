@@ -30,6 +30,8 @@
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
+body { hyphens: none; word-break: normal; overflow-wrap: normal; }
+.thead > span, .spec-r label, .switch em, .field > label, .mrow label, .ai-sec, .hw-rec, .dim.sm, .card h3 { word-break: normal; overflow-wrap: normal; hyphens: none; }
 
 html, body {
   height: 100vh;
@@ -79,6 +81,8 @@ html, body {
 .side {
   display: flex; flex-direction: column; gap: 18px;
   padding: 20px 14px;
+  /* на низком окне сайдбар скроллится сам, а не обрезается по overflow:hidden у body */
+  overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin;
   background: linear-gradient(180deg, rgba(20, 22, 30, .9), rgba(12, 14, 20, .9));
   border-right: 1px solid var(--line);
   backdrop-filter: blur(18px);
@@ -281,17 +285,33 @@ input[type=range]:active::-webkit-slider-thumb { transform: scale(1.05); }
   border: 1px solid var(--line); border-radius: var(--r-lg) var(--r-lg) 0 0;
   background: var(--card); backdrop-filter: blur(14px); box-shadow: var(--sh-2); overflow: hidden;
 }
+/* шапка и строки живут в одном горизонтальном скролле: колонки
+   minmax(min,fr) растут вместе с окном, min-width держит выравнивание */
+.table-scroll { flex: 1 1 auto; min-height: 0; overflow: auto; }
 .thead, .trow {
-  display: grid; align-items: center; gap: 8px; padding: 0 12px;
-  grid-template-columns: 26px minmax(90px, .9fr) minmax(140px, 1.3fr) 84px 108px 62px minmax(120px, 1fr) 82px 84px 128px 96px 92px;
+  display: grid; align-items: center; gap: 8px; padding: 0 12px; min-width: 1180px;
+  grid-template-columns:
+    26px minmax(104px, .95fr) minmax(160px, 1.5fr) minmax(96px, .8fr)
+    minmax(112px, .95fr) 62px minmax(140px, 1.05fr) minmax(92px, .8fr)
+    minmax(92px, .8fr) minmax(120px, 1fr) minmax(104px, .85fr) minmax(120px, 1fr);
 }
 .thead {
-  height: 38px; flex: 0 0 auto; border-bottom: 1px solid var(--line);
-  background: rgba(28, 30, 42, .8); color: var(--dim); font-size: 10.5px;
-  text-transform: uppercase; letter-spacing: .08em; font-weight: 650;
+  position: sticky; top: 0; z-index: 3; min-height: 40px;
+  border-bottom: 1px solid var(--line);
+  background: rgba(28, 30, 42, .92); backdrop-filter: blur(8px);
+  color: var(--dim); font-size: 10.5px;
+  text-transform: uppercase; letter-spacing: .04em; font-weight: 650;
+}
+.thead > span {
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  word-break: keep-all; overflow-wrap: normal; hyphens: none;
 }
 .thead .c-new { color: var(--muted); }
-.tbody { overflow: auto; flex: 1; min-height: 0; }
+.tbody { overflow: visible; }
+/* ячейки не вылезают за свою колонку: без переносов и наезда на соседей */
+.thead > span, .trow > * { min-width: 0; overflow: hidden; }
+.trow > * { white-space: nowrap; }
+.table-scroll > .empty { min-height: 46vh; }
 .trow {
   min-height: 46px; border-bottom: 1px solid rgba(42, 45, 62, .5);
   font-size: 12.5px; cursor: default;

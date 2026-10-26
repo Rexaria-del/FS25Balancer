@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>FS25 Автобалансировщик v15</title>
 <meta http-equiv="Cache-Control" content="no-store">
-<link rel="stylesheet" href="css/app.css?v=15.4b">
+<link rel="stylesheet" href="css/app.css?v=15.5">
 <script>
 window.__jsErrors = [];
 window.addEventListener("error", function (e) {
@@ -114,17 +114,19 @@ setInterval(function () {
         <button class="chip" data-f="review">⚠️ Проверить</button>
       </div>
       <div class="table-card">
+        <div class="table-scroll">
         <div class="thead">
-          <span class="c-type"></span><span class="c-mod">Мод</span><span class="c-name">Название</span><span class="c-brand">Бренд</span>
-          <span class="c-country">Страна</span><span class="c-retro">Ретро</span><span class="c-specs">Хар-ки</span><span class="c-old">Старая</span>
-          <span class="c-base">База</span><span class="c-new" id="thNew">Новая</span><span class="c-rub" id="thRub">₽</span><span class="c-src">Источник</span>
+          <span class="c-type"></span><span class="c-mod" title="Файл мода">Мод</span><span class="c-name" title="Название позиции">Название</span><span class="c-brand" title="Бренд">Бренд</span>
+          <span class="c-country" title="Страна (двойной клик — сменить)">Страна</span><span class="c-retro" title="Ретро-режим">Ретро</span><span class="c-specs" title="Характеристики (клик — правка)">Хар-ки</span><span class="c-old" title="Цена в файле до балансировки">Старая</span>
+          <span class="c-base" title="Базовая цена по ТТХ">База</span><span class="c-new" id="thNew" title="Новая цена">Новая</span><span class="c-rub" id="thRub" title="Цена в рублях">₽</span><span class="c-src" title="Источник значения и множители">Источник</span>
         </div>
         <div class="tbody" id="tbody"></div>
         <div class="empty" id="empty" hidden>
           <div class="empty-ic">🚜</div>
           <p>Пока пусто. Выбери папку mods и нажми «Сканировать».</p>
         </div>
-        <div class="table-foot"><span id="shownCount"></span><span>FS25 Balancer · v15</span></div>
+        </div>
+        <div class="table-foot"><span id="shownCount"></span><span>FS25 Balancer · v15.5</span></div>
       </div>
     </section>
 
@@ -289,6 +291,6 @@ setInterval(function () {
 <div class="toast-wrap" id="toasts"></div>
 <div class="logbar"><span class="dot"></span><span id="logText" class="dim">готов</span></div>
 
-<script src="js/app.js?v=15.4b"></script>
+<script src="js/app.js?v=15.5"></script>
 </body>
 </html>

@@ -1181,7 +1181,7 @@ function updateCurrencyUI(c) {
        Писать в этом режиме готовые рубли — двойная конвертация, цены раздует в ${Math.round(rate)} раз.`;
   const thN = $("#thNew"), thR = $("#thRub");
   if (thN) thN.textContent = direct ? "Новая ₽" : "Новая €";
-  if (thR) thR.textContent = direct ? "₽ итог" : "₽ (домножит игра)";
+  if (thR) thR.textContent = direct ? "₽ итог" : "₽ в игре";
 }
 
 /* ── слайдеры настроек ── */
@@ -1426,8 +1426,23 @@ function canScroll(el, dy) {
   if (dy > 0 && el.scrollTop + el.clientHeight >= el.scrollHeight - 1.5) return false;
   return true;
 }
+function canScrollX(el, dx) {
+  if (!el || el.nodeType !== 1) return false;
+  const ox = getComputedStyle(el).overflowX;
+  if ((ox !== "auto" && ox !== "scroll") || el.scrollWidth <= el.clientWidth + 4) return false;
+  if (dx < 0 && el.scrollLeft <= 0) return false;
+  if (dx > 0 && el.scrollLeft + el.clientWidth >= el.scrollWidth - 1.5) return false;
+  return true;
+}
 document.addEventListener("wheel", e => {
   let el = e.target instanceof Element ? e.target : (e.target && e.target.parentElement);
+  if (Math.abs(e.deltaX) > Math.abs(e.deltaY)) {
+    while (el && el !== document.body) {
+      if (canScrollX(el, e.deltaX)) { el.scrollLeft += e.deltaX; e.preventDefault(); return; }
+      el = el.parentElement;
+    }
+    return;
+  }
   while (el && el !== document.body) {
     if (canScroll(el, e.deltaY)) { el.scrollTop += e.deltaY; e.preventDefault(); return; }
     el = el.parentElement;
@@ -1563,6 +1578,16 @@ window.addEventListener("resize", () => { if (S.tourStep >= 0) placeTour(); });
 
 /* ── история обновлений ── */
 const CHANGELOG = [
+  { v: "15.5", date: "2026-10-26", title: "Таблица и шапка: порядок", items: [
+    "Убраны дубли кнопок «? Обучение» и «v… история» — теперь они только в шапке",
+    "Шапка таблицы и строки живут в одном скролл-контейнере: колонки не разъезжаются при горизонтальной прокрутке",
+    "Заголовки колонок закреплены (sticky) и видны при прокрутке списка вниз",
+    "Колонки minmax(min, fr): таблица симметрично тянется и сжимается вместе с окном",
+    "Заголовки не рвутся посреди слова: nowrap + многоточие + подсказка с полным текстом",
+    "Числа в ячейках не переносятся на вторую строку — высота строк одинаковая",
+    "Горизонтальная прокрутка таблицы shift+колесом",
+    "Колонка рубля подписана «₽ в игре» — видно, что цену домножает игра",
+  ]},
   { v: "15.4", date: "2026-10-26", title: "Редактор ТТХ по классам", items: [
     "Двойной клик по строке или «Хар-ки» открывает редактор только тех параметров, что реально есть в XML этого мода: техника, здание/силос, производство",
     "Техника: мощность, максимальная скорость, ширина захвата, объём бака, требуемая мощность; правка л.с. конкретной комплектации двигателя",
@@ -1637,30 +1662,18 @@ function openChangelog() {
   $("#clModal").hidden = false;
 }
 
-/* ── кнопки помощи: в шапке (всегда видны) + продублированы в статус-баре ── */
+/* ── кнопки помощи: один раз, в шапке (всегда видны при любом размере окна) ── */
 function injectFooterButtons() {
-  const mk = () => `<button class="mini" title="Интерактивное обучение">? Обучение</button>` +
-                   `<button class="mini" title="История обновлений программы">` +
-                   `v${(S.boot && S.boot.version) || "15.0"} · история</button>`;
-
+  const tb = $(".tb-right");
+  if (!tb || $(".help-box")) return;
   const top = document.createElement("div");
   top.className = "help-box";
-  top.innerHTML = mk();
-  const tb = $(".tb-right");
-  if (tb) tb.appendChild(top);
-
-  const bar = $(".logbar");
-  if (bar) {
-    const foot = document.createElement("div");
-    foot.style.cssText = "margin-left:auto;display:flex;gap:8px";
-    foot.innerHTML = mk();
-    bar.appendChild(foot);
-  }
-
-  document.querySelectorAll(".help-box .mini, .logbar .mini").forEach(b => {
-    if (/Обучение/.test(b.textContent)) b.onclick = () => startTour();
-    else b.onclick = () => openChangelog();
-  });
+  top.innerHTML = `<button class="mini" id="btnTour" title="Интерактивное обучение">? Обучение</button>` +
+                  `<button class="mini" id="btnCl" title="История обновлений программы">` +
+                  `v${(S.boot && S.boot.version) || "15.5"} · история</button>`;
+  tb.appendChild(top);
+  $("#btnTour").onclick = () => startTour();
+  $("#btnCl").onclick = () => openChangelog();
 }
 
 /* ── старт ── */
