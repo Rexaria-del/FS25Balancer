@@ -5,11 +5,11 @@
 Добавлено: ретро-множитель, несколько комплектаций двигателя, поля.
 """
 
-import hashlib, math, os, re, shutil, struct, time, zipfile
+import copy, hashlib, math, os, re, shutil, struct, threading, time, zipfile, zlib
 import xml.etree.ElementTree as ET
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from core.ai import ai_cheat_hint, detect_country_and_retro
+from core.ai import ai_cheat_hint, assess_specs, detect_country_and_retro
 from core.ai_state import get_learned, get_spec_patches
 from core.cheat import evaluate as cheat_evaluate
 from core.i18n import category_label as i18n_category, country_name as i18n_country
@@ -169,14 +169,9 @@ def extract_placeable_data(root: ET.Element) -> Tuple[float, int, float]:
     if slots == 0:
         slots = len(root.findall(".//stalls/stall"))
 
-    prod = 0.0
-    for pp in root.findall(".//productions/production"):
-        c = pf(pp.get("costsPerActiveHour"))
-        if c > 0:
-            prod += c
-        c2 = pf(pp.get("costsPerActiveMonth"))
-        if c2 > 0:
-            prod += c2 / 24.0
+    prod = sum(max(pf(line.get("costsPerActiveHour")),
+                   pf(line.get("costsPerActiveMonth")) / 24)
+               for line in root.findall(".//productions/production"))
 
     return cap, slots, prod
 
@@ -201,6 +196,13 @@ def _attr_num(el: ET.Element, *names: str) -> float:
             if f > 0:
                 return f
     return 0.0
+
+
+def _set_attr_num(element: ET.Element, attribute: str, value: float) -> bool:
+    if element.get(attribute) is not None and pf(element.get(attribute)) == float(value):
+        return False
+    element.set(attribute, "{:g}".format(value))
+    return True
 
 
 def _prod_amount(el: ET.Element) -> float:
@@ -251,8 +253,9 @@ def extract_production_specs(root: ET.Element, l10n: Dict[str, str]) -> List[Pro
 def extract_plant_storage(root: ET.Element) -> float:
     """Вместимость внутренних складов здания (storages/storage, включая node-ячейки)."""
     total = 0.0
-    for se in root.findall(".//storages/storage"):
-        total += _capacity_of(se)
+    for se in root.findall(".//storage"):
+        capacities = se.findall("capacity")
+        total += sum(max(0.0, pf(cap.get("capacity") or cap.text)) for cap in capacities) if capacities else _capacity_of(se)
         for n in se.findall("node"):
             total += max(0.0, pf(n.get("capacity")))
     return max(0.0, round(total, 2))
@@ -379,6 +382,7 @@ def process_xml_root(root: ET.Element, rel_path: str, mod_name: str,
     # расчёт, предпросмотр и запись в файл видят уже изменённые значения
     kind = "field" if is_field else ("placeable" if is_place else "vehicle")
     patch = get_spec_patches().get(ukey)
+    original_specs = ET.tostring(root) if write and patch else None
     if patch and kind != "field":
         try:
             apply_patch(root, patch, kind)
@@ -491,12 +495,12 @@ def process_xml_root(root: ET.Element, rel_path: str, mod_name: str,
         if overrides and ukey in overrides:
             new_xml = int(overrides[ukey])
             manual_price = new_xml
-            base_eur = new_xml / (k_country * k_retro_eff * xm)
+            base_eur = new_xml / max(k_country * k_retro_eff * xm, 1e-9)
         else:
             base_eur, steps = calc_placeable_price_ex(
                 cat_key, title, rel_path, cap, slots, prod_hour, cfg.k_placeable,
                 cfg.global_difficulty_scale, prod_throughput=thr, goods_count=goods,
-                storage_capacity=plant_cap, lang=lang)
+                storage_capacity=plant_cap, lang=lang, prod_input=in_am, prod_output=out_am)
             priced, k_country, k_retro_eff = apply_item_multipliers(
                 base_eur, k_country, is_retro, cfg)
             new_xml = clean_round(priced * xm)
@@ -504,19 +508,20 @@ def process_xml_root(root: ET.Element, rel_path: str, mod_name: str,
         new_rub = rub_from_xml(new_xml, cfg)
         chain = finish_chain(steps, base_eur, k_country, k_retro_eff, is_retro, xm,
                              new_xml, new_rub, lang, manual=manual_price is not None)
-        verdict = cheat_evaluate(
-            {"item_type": "placeable", "hp": 0.0, "max_speed": 0.0, "working_width": 0.0,
+        cheat_values = {"item_type": "placeable", "hp": 0.0, "max_speed": 0.0, "working_width": 0.0,
              "capacity": max(cap, plant_cap), "needed_hp": 0.0, "prod_cycles": cph,
-             "old_price": old_price, "new_price": new_xml},
-            cfg, ai_cheat_hint(brand, title, rel_path, mod_name))
+             "prod_input": in_am, "prod_output": out_am, "prod_month_cost": cm,
+             "old_price": old_price, "new_price": new_xml}
+        verdict = cheat_evaluate(cheat_values, cfg,
+            assess_specs(brand, title, rel_path, mod_name, cheat_values, cfg))
         changed = False
         if write:
             changed = _set_num(price_el, new_xml)
             upkeep = sd.find("dailyUpkeep")
             if upkeep is not None:
                 changed = _set_num(upkeep, max(1, int(round(new_xml * 0.002)))) or changed
-            if patch:
-                changed = True          # ручные правки ТТХ всё равно надо записать
+            if original_specs is not None:
+                changed = ET.tostring(root) != original_specs
 
         return ItemSpec(
             mod_name=mod_name, xml_rel_path=rel_path, item_type="placeable",
@@ -571,7 +576,7 @@ def process_xml_root(root: ET.Element, rel_path: str, mod_name: str,
     if overrides and ukey in overrides:
         new_xml = int(overrides[ukey])
         manual_price = new_xml
-        base_eur = new_xml / (k_country * k_retro_eff * xm)
+        base_eur = new_xml / max(k_country * k_retro_eff * xm, 1e-9)
     else:
         raw_eur = calc_vehicle_price(category, base_hp, max_spd, base_cap, ww, nhp, 1.0, 1.0)
         eur_raw = calc_vehicle_price(category, base_hp, max_spd, base_cap, ww, nhp,
@@ -589,11 +594,11 @@ def process_xml_root(root: ET.Element, rel_path: str, mod_name: str,
     new_rub = rub_from_xml(new_xml, cfg)
     chain = finish_chain(steps, base_eur, k_country, k_retro_eff, is_retro, xm,
                          new_xml, new_rub, lang, manual=manual_price is not None)
-    verdict = cheat_evaluate(
-        {"item_type": "vehicle", "hp": base_hp, "max_speed": max_spd, "working_width": ww,
+    cheat_values = {"item_type": "vehicle", "hp": base_hp, "max_speed": max_spd, "working_width": ww,
          "capacity": base_cap, "needed_hp": nhp, "prod_cycles": 0.0,
-         "old_price": old_price, "new_price": new_xml},
-        cfg, ai_cheat_hint(brand, title, rel_path, mod_name))
+         "old_price": old_price, "new_price": new_xml}
+    verdict = cheat_evaluate(cheat_values, cfg,
+        assess_specs(brand, title, rel_path, mod_name, cheat_values, cfg))
     changed = False
 
     if write:
@@ -601,14 +606,19 @@ def process_xml_root(root: ET.Element, rel_path: str, mod_name: str,
         upkeep = sd.find("dailyUpkeep")
         if upkeep is not None:
             changed = _set_num(upkeep, max(5, int(round(new_xml * 0.0025 * wear)))) or changed
-        if patch:
-            changed = True
+        if original_specs is not None:
+            changed = ET.tostring(root) != original_specs
 
     # ── Комплектации (несколько двигателей) ──
     motor_specs: List[MotorSpec] = []
     motor_prices: List[Dict[str, Any]] = []
     cnt = 0
     for i, (mc, hp_i, spd_i, tq_i) in enumerate(motors):
+        motor_patch = (patch or {}).get("_motors", {}).get(str(i), {})
+        if motor_patch:
+            hp_i = float(motor_patch.get("hp", hp_i))
+            if write:
+                changed = _set_attr_num(mc, "hp", hp_i) or changed
         label = mc.get("name") or f"Комплектация {chr(65 + i)}"
         delta = max(0.0, hp_i - base_hp)
         if i == 0:
@@ -625,12 +635,18 @@ def process_xml_root(root: ET.Element, rel_path: str, mod_name: str,
                     mc.set("price", want)
                     changed = True
             cnt += 1
+        if "price_delta" in motor_patch:
+            delta_price = int(motor_patch["price_delta"])
+            if write:
+                changed = _set_attr_num(mc, "price", delta_price) or changed
 
         motor_specs.append(MotorSpec(label=label, hp=hp_i, max_speed=spd_i,
                                      torque=tq_i, price_delta=delta_price, index=i))
         total = clean_round(new_xml + delta_price)
         motor_prices.append({"index": i, "label": label, "hp": hp_i,
                              "speed": spd_i, "delta": delta_price, "total": total})
+    if write and original_specs is not None:
+        changed = ET.tostring(root) != original_specs
 
     return ItemSpec(
         mod_name=mod_name, xml_rel_path=rel_path, item_type="vehicle",
@@ -704,6 +720,7 @@ def _copy_raw_entry(src_fh, out_fh, zo: zipfile.ZipFile, item: zipfile.ZipInfo) 
                              dostime, dosdate, item.CRC, item.compress_size,
                              item.file_size, len(nb), 0))
     out_fh.write(nb)
+    DISK.add("zip_head", 30 + len(nb))
     src_fh.seek(data_off)
     left = int(item.compress_size)
     while left > 0:
@@ -711,6 +728,7 @@ def _copy_raw_entry(src_fh, out_fh, zo: zipfile.ZipFile, item: zipfile.ZipInfo) 
         if not buf:
             raise IOError("запись обрезана: " + item.filename)
         out_fh.write(buf)
+        DISK.add("zip_copy", len(buf))
         left -= len(buf)
     item.flag_bits = flags
     item.extra = b""            # локальный и центральный extra должны совпадать
@@ -736,16 +754,75 @@ def _atomic_write(path: str, data: bytes) -> None:
     tmp = path + ".tmp"
     with open(tmp, "wb") as f:
         f.write(data)
+        f.flush()
+        os.fsync(f.fileno())
+    DISK.add("xml", len(data))
     _replace_with_retry(tmp, path)
 
 
+def _backup_file_bytes(data: bytes, dst: str) -> None:
+    parent = os.path.dirname(dst)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    if os.path.exists(dst):
+        return
+    _atomic_write(dst, data)
+
+
+def restore_mod_backup(mod_path: str, backup_root: str) -> int:
+    """Возвращает мод к исходным ценам из резервных копий.
+
+    Папка-мод: файлы копируются обратно атомарно. Zip-мод: исходные XML
+    записываются точечно (in-place), сотни мегабайт ассетов не трогаются.
+    Возвращает число восстановленных файлов.
+    """
+    mod_name = os.path.basename(mod_path)
+    src_root = os.path.join(backup_root, mod_name)
+    if not os.path.isdir(src_root) and mod_path.lower().endswith(".zip"):
+        src_root = os.path.join(backup_root, os.path.splitext(mod_name)[0])
+    if not os.path.isdir(src_root):
+        return 0
+    done = 0
+    if mod_path.lower().endswith(".zip"):
+        modified: Dict[str, bytes] = {}
+        for root, _dirs, files in os.walk(src_root):
+            for fn in files:
+                full = os.path.join(root, fn)
+                rel = os.path.relpath(full, src_root).replace(os.sep, "/")
+                with open(full, "rb") as f:
+                    modified[rel] = f.read()
+        if modified:
+            rebuild_mod_zip(mod_path, modified)
+            done += len(modified)
+        return done
+    for root, _dirs, files in os.walk(src_root):
+        for fn in files:
+            full = os.path.join(root, fn)
+            rel = os.path.relpath(full, src_root)
+            dst = os.path.join(mod_path, rel)
+            with open(full, "rb") as f:
+                data = f.read()
+            if os.path.isfile(dst):
+                with open(dst, "rb") as current:
+                    if current.read() == data:
+                        continue
+            _atomic_write(dst, data)
+            done += 1
+    return done
+
+
 def _backup_file(src: str, dst: str) -> None:
+    """Один файл → один бэкап. Жёсткая ссылка: ноль байт записи и доли секунды."""
+    parent = os.path.dirname(dst)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
     if os.path.exists(dst):
         return
     try:
         os.link(src, dst)                     # NTFS: доли секунды и 0 байт лишнего места
     except (OSError, NotImplementedError):
         shutil.copy2(src, dst)
+        DISK.add("backup", os.path.getsize(dst))
 
 
 def _backup_tree(src_dir: str, dst_dir: str) -> None:
@@ -790,6 +867,174 @@ def _verify_zip(tmp_path: str, src_path: str, modified: Dict[str, bytes]) -> Non
                 raise ValueError("расхождение байтов " + it.filename)
 
 
+# ── Счётчик реально записанных байтов (пользователь видит износ диска) ─────────
+
+class _DiskMeter:
+    """Байты, переданные файловой системе; аппаратные записи SSD не измеряются."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.written = 0
+        self.read = 0
+        self.by_kind: Dict[str, int] = {}
+
+    def reset(self) -> None:
+        with self._lock:
+            self.written = 0
+            self.read = 0
+            self.by_kind = {}
+
+    def add(self, kind: str, n: int) -> None:
+        with self._lock:
+            self.written += int(n)
+            self.by_kind[kind] = self.by_kind.get(kind, 0) + int(n)
+
+    def payload(self) -> Dict[str, Any]:
+        with self._lock:
+            return {"written": self.written, "read": self.read,
+                    "by_kind": dict(self.by_kind)}
+
+
+DISK = _DiskMeter()
+
+
+def reset_disk_meter() -> None:
+    DISK.reset()
+
+
+def disk_payload() -> Dict[str, Any]:
+    return DISK.payload()
+
+
+def _write_out(fh, data: bytes, kind: str) -> None:
+    fh.write(data)
+    DISK.add(kind, len(data))
+
+
+def _deflate_raw(data: bytes, level: int = 6) -> bytes:
+    """RAW-deflate как в zip-контейнере (без zlib-заголовка)."""
+    co = zlib.compressobj(level, zlib.DEFLATED, -zlib.MAX_WBITS)
+    return co.compress(data) + co.flush()
+
+
+# ── Минимальная правка архива: дописали только новые XML + переписали оглавление ──
+
+_JOURNAL_HEADER = struct.Struct("<8sQQI")
+_JOURNAL_MAGIC = b"FS25ZIP1"
+
+
+class _MeteredFile:
+    def __init__(self, stream):
+        self.stream = stream
+
+    def __getattr__(self, name):
+        return getattr(self.stream, name)
+
+    def write(self, data):
+        written = self.stream.write(data)
+        DISK.add("zip", written)
+        return written
+
+
+def _lock_journal(stream) -> None:
+    stream.seek(0)
+    if os.name == "nt":
+        import msvcrt
+        msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+    else:
+        import fcntl
+        fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def recover_mod_zip(mod_path: str) -> bool:
+    journal_path = mod_path + ".fs25txn"
+    if not os.path.isfile(journal_path):
+        return False
+    with open(journal_path, "r+b") as journal:
+        _lock_journal(journal)
+        header = journal.read(_JOURNAL_HEADER.size)
+        if len(header) != _JOURNAL_HEADER.size:
+            raise ValueError("Неполный журнал ZIP: " + journal_path)
+        magic, offset, original_size, checksum = _JOURNAL_HEADER.unpack(header)
+        tail = journal.read()
+        if (magic != _JOURNAL_MAGIC or original_size != offset + len(tail)
+                or zlib.crc32(tail) != checksum):
+            raise ValueError("Повреждён журнал ZIP: " + journal_path)
+        with open(mod_path, "r+b") as target:
+            if os.fstat(target.fileno()).st_size < offset:
+                raise ValueError("Архив не соответствует журналу восстановления")
+            target.seek(offset)
+            _write_out(target, tail, "recovery")
+            target.truncate(original_size)
+            target.flush()
+            os.fsync(target.fileno())
+    os.remove(journal_path)
+    return True
+
+
+def _update_zip_inplace(mod_path: str, modified: Dict[str, bytes]) -> None:
+    """Пишет XML и каталог ZIP. Журнал хранит только заменяемый хвост архива."""
+    with zipfile.ZipFile(mod_path, "r") as z:
+        entries = z.infolist()
+        if len({entry.filename for entry in entries}) != len(entries):
+            raise ValueError("В архиве есть повторяющиеся имена файлов")
+        if not set(z.namelist()).issuperset(modified):
+            raise ValueError("в архиве нет ожидаемых записей")
+        offset = z.start_dir
+        comment = z.comment
+        originals = {name: copy.copy(z.getinfo(name)) for name in modified}
+    with open(mod_path, "rb") as source:
+        source.seek(offset)
+        tail = source.read()
+        original_size = source.tell()
+    journal_path = mod_path + ".fs25txn"
+    journal = open(journal_path, "x+b")
+    try:
+        _write_out(journal, _JOURNAL_HEADER.pack(
+            _JOURNAL_MAGIC, offset, original_size, zlib.crc32(tail)), "journal")
+        _write_out(journal, tail, "journal")
+        journal.flush()
+        _lock_journal(journal)
+        os.fsync(journal.fileno())
+        try:
+            with open(mod_path, "r+b") as stream:
+                with zipfile.ZipFile(_MeteredFile(stream), "a") as target:
+                    target.filelist[:] = [entry for entry in target.filelist
+                                          if entry.filename not in modified]
+                    for name, data in modified.items():
+                        target.NameToInfo.pop(name, None)
+                        target.writestr(originals[name], data)
+                stream.flush()
+                os.fsync(stream.fileno())
+            _verify_inplace(mod_path, modified, len(entries), comment)
+        except BaseException:
+            with open(mod_path, "r+b") as stream:
+                stream.seek(offset)
+                _write_out(stream, tail, "recovery")
+                stream.truncate(original_size)
+                stream.flush()
+                os.fsync(stream.fileno())
+            raise
+    finally:
+        journal.close()
+    os.remove(journal_path)
+
+
+def _verify_inplace(path: str, modified: Dict[str, bytes], count: int,
+                    comment: bytes) -> None:
+    with zipfile.ZipFile(path) as z:
+        if len(z.infolist()) != count:
+            raise ValueError("оглавление потеряло записи: %d вместо %d"
+                             % (len(z.infolist()), count))
+        if (z.comment or b"") != comment:
+            raise ValueError("пропал комментарий архива")
+        for name, data in modified.items():
+            if z.read(name) != data:
+                raise ValueError("в архиве лежит не то, что записывали: " + name)
+        if len(set(z.namelist())) != count:
+            raise ValueError("дубли записей в оглавлении")
+
+
 def _rebuild_zip_fast(mod_path: str, modified: Dict[str, bytes]) -> None:
     tmp = mod_path + ".tmp"
     try:
@@ -815,7 +1060,7 @@ def _rebuild_zip_fast(mod_path: str, modified: Dict[str, bytes]) -> None:
 
 
 def _rebuild_zip_safe(mod_path: str, modified: Dict[str, bytes]) -> None:
-    """Гарантированный путь v15: полное пережатие. Запасной, если быстрый не понравился читателю."""
+    """Полное пережатие: только для архивов, которые нельзя править точечно."""
     tmp = mod_path + ".tmp"
     try:
         with zipfile.ZipFile(mod_path, "r") as zi, \
@@ -835,15 +1080,23 @@ def _rebuild_zip_safe(mod_path: str, modified: Dict[str, bytes]) -> None:
 
 
 def rebuild_mod_zip(mod_path: str, modified: Dict[str, bytes]) -> str:
+    """Возвращает применённую стратегию: skip | inplace | rebuild | safe.
+
+    inplace — основной путь: пишет только изменённые XML и оглавление архива.
+    rebuild — raw-копия всего архива без пережатия (если оглавление не в хвосте
+    или архив с zip64/комментарием). safe — полное пережатие, крайний случай.
+    """
     if not modified:
         return "skip"
-    try:
-        _rebuild_zip_fast(mod_path, modified)
-        return "fast"
-    except Exception as e:
-        print("[zip] быстрый путь не удался (%s): пересборка пережатием" % e)
-        _rebuild_zip_safe(mod_path, modified)
-        return "safe"
+    recover_mod_zip(mod_path)
+    with zipfile.ZipFile(mod_path, "r") as archive:
+        modified = {name: data for name, data in modified.items()
+                    if archive.read(name) != data}
+    if not modified:
+        return "skip"
+    _update_zip_inplace(mod_path, modified)
+    return "inplace"
+
 
 
 def process_mod(mod_path: str, cfg: BalancerConfig, apply: bool = False,
@@ -868,7 +1121,6 @@ def process_mod(mod_path: str, cfg: BalancerConfig, apply: bool = False,
         except Exception:
             return results
 
-        backed = False
         for sf in sfiles:
             if stop and stop.is_set():
                 break
@@ -880,15 +1132,17 @@ def process_mod(mod_path: str, cfg: BalancerConfig, apply: bool = False,
                 spec = process_xml_root(tree.getroot(), sf, mod_name, l10n, cfg,
                                         overrides, write=apply)
                 if spec:
-                    if apply:
-                        # бэкап папки-мода перед первой записью (zip-ветка делает это ниже)
-                        if not backed and cfg.create_backups and backup_dir:
-                            os.makedirs(backup_dir, exist_ok=True)
-                            _backup_tree(mod_path, os.path.join(backup_dir, mod_name))
-                            backed = True
+                    if apply and spec.needs_write:
+                        # бэкапим ТОЛЬКО тот XML, который сейчас перепишем
+                        if cfg.create_backups and backup_dir:
+                            _backup_file(fp, os.path.join(backup_dir, mod_name, sf))
                         _atomic_write(fp, ET.tostring(tree.getroot(), encoding="utf-8",
                                                       xml_declaration=True))
                     results.append(spec)
+            except OSError:
+                if apply:
+                    raise
+                continue
             except Exception:
                 continue
         return results
@@ -896,6 +1150,7 @@ def process_mod(mod_path: str, cfg: BalancerConfig, apply: bool = False,
     if not mod_path.lower().endswith(".zip"):
         return results
 
+    recover_mod_zip(mod_path)
     modified: Dict[str, bytes] = {}
     try:
         with zipfile.ZipFile(mod_path, "r") as zf:
@@ -924,19 +1179,111 @@ def process_mod(mod_path: str, cfg: BalancerConfig, apply: bool = False,
                         if apply and spec.needs_write:
                             modified[real] = ET.tostring(root, encoding="utf-8",
                                                           xml_declaration=True)
+                except OSError:
+                    if apply:
+                        raise
+                    continue
                 except Exception:
                     continue
 
         if apply and modified and not (stop and stop.is_set()):
             if cfg.create_backups and backup_dir:
-                os.makedirs(backup_dir, exist_ok=True)
-                _backup_file(mod_path, os.path.join(backup_dir, mod_name))
+                # бэкапим только те XML, которые сейчас перепишем: из архива
+                # вытаскиваются исходные версии (килобайты), а не весь мод
+                with zipfile.ZipFile(mod_path, "r") as zf:
+                    for name in modified:
+                        dst = os.path.join(backup_dir, mod_name, name.replace("/", os.sep))
+                        if os.path.exists(dst):
+                            continue
+                        _backup_file_bytes(zf.read(name), dst)
             rebuild_mod_zip(mod_path, modified)
 
     except Exception as e:
+        if apply:
+            raise
         print(f"[Skip] {mod_name}: {e}")
 
     return results
+
+
+def apply_prepared_mod(mod_path: str, specs: List[ItemSpec], cfg: BalancerConfig,
+                       backup_dir: str, stop: Optional[Any] = None) -> List[ItemSpec]:
+    """Записывает подтверждённый результат без распознавания бренда и повторного расчёта."""
+    grouped: Dict[str, List[ItemSpec]] = {}
+    for spec in specs:
+        grouped.setdefault(spec.xml_rel_path, []).append(spec)
+        spec.needs_write = False
+    if mod_path.lower().endswith(".zip"):
+        recover_mod_zip(mod_path)
+        with zipfile.ZipFile(mod_path) as archive:
+            names = {name.replace("\\", "/").lower(): name for name in archive.namelist()}
+            originals = {names[path.replace("\\", "/").lower()]: archive.read(names[path.replace("\\", "/").lower()])
+                         for path in grouped}
+        actual = {path: names[path.replace("\\", "/").lower()] for path in grouped}
+    else:
+        originals = {}
+        actual = {}
+        base = os.path.realpath(mod_path)
+        for path in grouped:
+            destination = os.path.realpath(os.path.join(base, path.replace("\\", "/")))
+            if os.path.commonpath([base, destination]) != base:
+                raise ValueError("XML находится вне папки мода")
+            actual[path] = destination
+            with open(destination, "rb") as source:
+                originals[destination] = source.read()
+    modified = {}
+    changed_specs = []
+    for path, items in grouped.items():
+        if stop and stop.is_set():
+            return specs
+        root = ET.fromstring(originals[actual[path]])
+        before = ET.tostring(root)
+        spec = items[0]
+        patch = get_spec_patches().get(spec.unique_key, {})
+        if patch:
+            apply_patch(root, patch, spec.item_type)
+        data = root.find("storeData")
+        if data is None or data.find("price") is None:
+            raise ValueError("Не найден storeData/price: " + path)
+        _set_num(data.find("price"), spec.new_price)
+        upkeep = data.find("dailyUpkeep")
+        if upkeep is not None and spec.item_type != "field":
+            factor = 0.0025 * wear_for_item(spec.is_retro, cfg) if spec.item_type == "vehicle" else 0.002
+            _set_num(upkeep, max(5 if spec.item_type == "vehicle" else 1,
+                                  int(round(spec.new_price * factor))))
+        configurations = root.findall(".//motorConfigurations/motorConfiguration")
+        for motor in spec.motors:
+            if motor.index < len(configurations):
+                configuration = configurations[motor.index]
+                _set_attr_num(configuration, "price", motor.price_delta)
+                if str(motor.index) in patch.get("_motors", {}):
+                    original_hp = pf(configuration.get("hp"))
+                    engine = configuration.find("motor")
+                    torque = pf(engine.get("torqueScale")) if engine is not None else 0.0
+                    if engine is not None and original_hp > 0 and torque > 0:
+                        _set_attr_num(engine, "torqueScale", torque * motor.hp / original_hp)
+                    _set_attr_num(configuration, "hp", motor.hp)
+        if ET.tostring(root) == before:
+            continue
+        modified[actual[path]] = ET.tostring(root, encoding="utf-8", xml_declaration=True)
+        changed_specs.extend(items)
+    if not modified:
+        return specs
+    if cfg.create_backups:
+        for name in modified:
+            relative = name if mod_path.lower().endswith(".zip") else os.path.relpath(name, mod_path)
+            if os.path.isabs(relative) or ".." in relative.replace("\\", "/").split("/"):
+                raise ValueError("Небезопасный путь XML в архиве")
+            destination = os.path.join(backup_dir, os.path.basename(mod_path), relative.replace("/", os.sep))
+            _backup_file_bytes(originals[name], destination)
+    if mod_path.lower().endswith(".zip"):
+        rebuild_mod_zip(mod_path, modified)
+    else:
+        for name, content in modified.items():
+            _atomic_write(name, content)
+    for spec in changed_specs:
+        spec.needs_write = True
+    return specs
 
 
 def finalize_spec(s: ItemSpec, cfg: BalancerConfig, steps: List[Dict[str, Any]],
@@ -1023,7 +1370,8 @@ def recalc_specs(specs: List[ItemSpec], cfg: BalancerConfig,
                 cat, s.title, s.xml_rel_path, c.get("cap", 0.0), c.get("slots", 0),
                 c.get("prod", 0.0), cfg.k_placeable, cfg.global_difficulty_scale,
                 prod_throughput=c.get("thr", 0.0), goods_count=goods,
-                storage_capacity=c.get("scap", 0.0), lang=lang)
+                storage_capacity=c.get("scap", 0.0), lang=lang,
+                prod_input=c.get("in", 0.0), prod_output=c.get("out", 0.0))
             k_c = cfg.multiplier_for(s.country) if s.country in _known_countries() else 1.0
             priced, k_c, k_r = apply_item_multipliers(base_eur, k_c, s.is_retro, cfg)
             s.base_price = clean_round(base_eur * xm)
@@ -1062,6 +1410,7 @@ def recalc_specs(specs: List[ItemSpec], cfg: BalancerConfig,
         cnt = 0
         s.motor_prices = []
         for i, m in enumerate(s.motors):
+            motor_patch = get_spec_patches().get(s.unique_key, {}).get("_motors", {}).get(str(m.index), {})
             if i == 0:
                 m.price_delta = 0
             else:
@@ -1069,6 +1418,8 @@ def recalc_specs(specs: List[ItemSpec], cfg: BalancerConfig,
                                                       max(0.0, m.hp - c.get("hp", 0.0)),
                                                       k_country, xm, s.is_retro, cfg)
                 cnt += 1
+            if "price_delta" in motor_patch:
+                m.price_delta = int(motor_patch["price_delta"])
             s.motor_prices.append({"index": i, "label": m.label, "hp": m.hp,
                                    "speed": m.max_speed, "delta": m.price_delta,
                                    "total": clean_round(s.new_price + m.price_delta)})

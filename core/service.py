@@ -6,7 +6,7 @@ UI не блокируется: все тяжёлые операции идут 
 """
 
 import concurrent.futures as _futures
-import os, threading, time
+import math, os, threading, time
 from collections import defaultdict
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -22,7 +22,8 @@ from core.i18n import norm_lang
 from core.countries import country_info as _country_info
 from core.models import (BalancerConfig, ItemSpec, ScanStats, ScanTarget,
                          SCAN_CATEGORY_KEYS, SCAN_TARGET_LABELS, subgroup_for)
-from core.parser import process_mod, recalc_specs
+from core.parser import (apply_prepared_mod, disk_payload, process_mod, recalc_specs,
+                         reset_disk_meter, restore_mod_backup)
 from core.pricing import (
     apply_item_multipliers, calc_placeable_price, calc_placeable_price_ex,
     calc_vehicle_price, clean_round, field_price, finish_chain, motor_price_for_delta,
@@ -54,12 +55,14 @@ class BalancerService:
     def __init__(self) -> None:
         self.specs: List[ItemSpec] = []
         self.raw_cache: Dict[str, Dict[str, Any]] = {}
+        self._mod_signatures: Dict[str, tuple] = {}
         self.overrides: Dict[str, int] = {}
-        self.bundle: Dict[str, Any] = {}      # импортированный прайс-бандл друга
+        self.bundle: Dict[str, Any] = storage.load_json("price_bundle.json", {})
         self.cfg = BalancerConfig()
         self.stats = ScanStats()
         self.busy = False
         self.last_error = ""
+        self._applying = False
         self._stop = threading.Event()
         self._lock = threading.RLock()
 
@@ -84,7 +87,7 @@ class BalancerService:
             create_backups=bool(data.get("create_backups", True)),
             use_local_ai=bool(data.get("use_local_ai", True)),
             stop_ai_on_close=bool(data.get("stop_ai_on_close", True)),
-            ai_model_name=str(data.get("ai_model_name", "phi3")),
+            ai_model_name=str(data.get("ai_model_name", "qwen2.5:3b")),
             scan_target=tgt,
             adjust_field_prices=bool(data.get("adjust_field_prices", False)),
             field_max_distance=max(0.1, float(data.get("field_max_distance", 3.0))),
@@ -95,6 +98,7 @@ class BalancerService:
             selected_countries=list(get_selected()),
             mods_dir=str(data.get("mods_dir", self.default_mods_dir())),
             ui_lang=norm_lang(data.get("ui_lang")),
+            tour_never=bool(data.get("tour_never", False)),
             scan_targets=self._scan_targets_from(data),
             cheat_detect=bool(data.get("cheat_detect", False)),
             cheat_use_ai=bool(data.get("cheat_use_ai", True)),
@@ -133,6 +137,7 @@ class BalancerService:
             "stop_ai_on_close": c.stop_ai_on_close,
             "ai_model_name": c.ai_model_name, "scan_target": c.scan_target.name,
             "ui_lang": c.ui_lang, "scan_targets": list(c.scan_targets),
+            "tour_never": c.tour_never,
             "cheat_detect": c.cheat_detect, "cheat_use_ai": c.cheat_use_ai,
             "cheat_max_hp": c.cheat_max_hp, "cheat_max_speed": c.cheat_max_speed,
             "cheat_max_width": c.cheat_max_width, "cheat_max_capacity": c.cheat_max_capacity,
@@ -171,6 +176,7 @@ class BalancerService:
             "ai_model_name": c.ai_model_name, "scan_target": c.scan_target.name,
             "scan_target_label": SCAN_TARGET_LABELS.get(c.scan_target, "Всё"),
             "ui_lang": c.ui_lang, "scan_targets": list(c.scan_targets),
+            "tour_never": c.tour_never,
             "cheat_detect": c.cheat_detect, "cheat_use_ai": c.cheat_use_ai,
             "cheat_max_hp": c.cheat_max_hp, "cheat_max_speed": c.cheat_max_speed,
             "cheat_max_width": c.cheat_max_width, "cheat_max_capacity": c.cheat_max_capacity,
@@ -206,7 +212,7 @@ class BalancerService:
         }
         BOOL_FIELDS = ("ac_mod_installed", "ac_converter", "ac_rate_auto", "ac_manual", "create_backups",
                        "use_local_ai", "adjust_field_prices", "retro_enabled",
-                       "stop_ai_on_close", "cheat_detect", "cheat_use_ai")
+                       "stop_ai_on_close", "cheat_detect", "cheat_use_ai", "tour_never")
         for k, v in (patch or {}).items():
             if k in FLOAT_FIELDS:
                 lo, hi = FLOAT_FIELDS[k]
@@ -257,6 +263,11 @@ class BalancerService:
                     pass
             elif k == "country_multipliers" and isinstance(v, dict):
                 c.country_multipliers = self._clean_multipliers(v)
+            elif k == "selected_countries" and isinstance(v, list):
+                selected = [name for name in v if name in _known()]
+                if selected:
+                    c.selected_countries = selected
+                    set_selected(selected)
         self.save_settings()
 
     def pro_payload(self) -> Dict[str, Any]:
@@ -282,6 +293,15 @@ class BalancerService:
         return {"ok": True, "apply": apply}
 
     def _scan_worker(self, mods_dir: str, apply: bool) -> None:
+        try:
+            self._scan_worker_impl(mods_dir, apply)
+        except Exception as error:
+            self.last_error = str(error)
+            emit("error", {"message": "Сканирование не завершено: " + str(error)})
+        finally:
+            self.busy = False
+
+    def _scan_worker_impl(self, mods_dir: str, apply: bool) -> None:
         backup_dir = os.path.join(mods_dir, "_backup_original_mods")
         try:
             items = sorted(f for f in os.listdir(mods_dir)
@@ -300,8 +320,10 @@ class BalancerService:
         with self._lock:
             self.specs = []
             self.raw_cache = {}
+            self._mod_signatures.clear()
         t0 = time.time()
 
+        reset_disk_meter()
         emit("scan_start", {"total": total, "apply": apply})
 
         # Сканирование — это чтение маленьких XML из архивов: идеально параллелится.
@@ -323,6 +345,10 @@ class BalancerService:
         for name, specs in self._imap(work, items, overrides):
             if self._stop.is_set():
                 break
+            path = os.path.join(mods_dir, name)
+            if os.path.isfile(path):
+                status = os.stat(path)
+                self._mod_signatures[name] = (status.st_size, status.st_mtime_ns)
             with lock:
                 done += 1
                 emit("progress", {"current": done, "total": total, "item": name})
@@ -351,6 +377,7 @@ class BalancerService:
             "found": found, "apply": apply, "stats": self.stats.__dict__,
             "aborted": self._stop.is_set(),
             "uncertain": [s.to_dict() for s in uncertain[:40]],
+            "disk": disk_payload(),
         })
 
     def _workers(self) -> int:
@@ -376,6 +403,8 @@ class BalancerService:
                 try:
                     yield nm, fut.result()
                 except Exception as e:
+                    if self._applying:
+                        raise
                     emit("log", {"message": "⚠ %s: %s" % (nm, e)})
                     yield nm, []
 
@@ -402,6 +431,18 @@ class BalancerService:
                 self.specs = updated
             n = max(1, len(updated))
             for i, s in enumerate(updated, 1):
+                if self.cfg.cheat_detect and self.cfg.cheat_use_ai and self.cfg.use_local_ai:
+                    from core.ai import assess_specs
+                    from core.cheat import evaluate
+                    values = {
+                        "item_type": s.item_type, "hp": s.hp, "max_speed": s.max_speed,
+                        "working_width": s.working_width, "needed_hp": s.needed_hp,
+                        "capacity": max(s.capacity, s.storage_capacity), "prod_cycles": s.prod_cycles,
+                        "prod_input": s.prod_input, "prod_output": s.prod_output,
+                        "old_price": s.old_price, "new_price": s.new_price}
+                    verdict = evaluate(values, self.cfg, assess_specs(
+                        s.brand, s.title, s.xml_rel_path, s.mod_name, values, self.cfg))
+                    s.is_cheat, s.cheat_reason, s.cheat_by = verdict["is_cheat"], verdict["cheat_reason"], verdict["cheat_by"]
                 emit("item", s.to_dict())
                 if i == n or i % 10 == 0:
                     emit("progress", {"current": i, "total": n, "item": s.title})
@@ -416,12 +457,64 @@ class BalancerService:
             self.busy = False
 
     # ── Применение результатов к уже отсканированным данным ──
+    def restore_backup(self) -> Dict[str, Any]:
+        """Откат: вернуть моды к исходным ценам из _backup_original_mods."""
+        if self.busy:
+            return {"ok": False, "error": "Идёт другая операция"}
+        mods_dir = self.cfg.mods_dir
+        backup_dir = os.path.join(mods_dir, "_backup_original_mods")
+        if not os.path.isdir(backup_dir):
+            return {"ok": False, "error": "Резервных копий нет"}
+        self.busy = True
+        emit("applied_start", {"total": 0, "restore": True})
+        threading.Thread(target=self._restore_worker, args=(mods_dir, backup_dir),
+                         daemon=True).start()
+        return {"ok": True}
+
+    def _restore_worker(self, mods_dir: str, backup_dir: str) -> None:
+        reset_disk_meter()
+        total = 0
+        try:
+            entries = sorted(os.listdir(backup_dir))
+            for index, entry in enumerate(entries, 1):
+                src = os.path.join(backup_dir, entry)
+                if not os.path.isdir(src):
+                    continue
+                mod_path = os.path.join(mods_dir, entry)
+                if not os.path.exists(mod_path):
+                    mod_path = os.path.join(mods_dir, entry + ".zip")
+                if not os.path.exists(mod_path):
+                    continue
+                total += restore_mod_backup(mod_path, backup_dir)
+                emit("applied_progress", {"done": index, "total": len(entries)})
+        except Exception as e:
+            emit("applied_done", {"ok": False, "error": str(e),
+                                  "disk": disk_payload()})
+            self.busy = False
+            return
+        emit("applied_done", {"ok": True, "restored": total,
+                              "disk": disk_payload()})
+        with self._lock:
+            self.specs.clear()
+            self.raw_cache.clear()
+            self.overrides.clear()
+            restored_mods = set(entries)
+            for key in list(get_spec_patches()):
+                if key.split("::", 1)[0] in restored_mods:
+                    get_spec_patches().pop(key, None)
+            persist()
+            self.bundle = {}
+            storage.save_json(self.BUNDLE_FILE, {})
+        emit("restored", {})
+        self.busy = False
+
     def apply_results(self) -> Dict[str, Any]:
         if self.busy:
             return {"ok": False, "error": "Занято"}
         if not self.specs:
             return {"ok": False, "error": "Нет данных для применения"}
         self.busy = True
+        self._stop.clear()
         emit("applied_start", {"total": len(self.specs)})
         threading.Thread(target=self._apply_worker, daemon=True).start()
         return {"ok": True}
@@ -435,6 +528,8 @@ class BalancerService:
         backup_dir = os.path.join(mods_dir, "_backup_original_mods")
         written = 0
         untouched = 0
+        reset_disk_meter()
+        self._applying = True
         try:
             with self._lock:
                 items = list(self.specs)
@@ -442,9 +537,9 @@ class BalancerService:
             for s in items:
                 overrides[s.unique_key] = int(s.new_price)
 
-            by_mod: Dict[str, int] = {}
+            by_mod: Dict[str, List[ItemSpec]] = {}
             for s in items:
-                by_mod[s.mod_name] = by_mod.get(s.mod_name, 0) + 1
+                by_mod.setdefault(s.mod_name, []).append(s)
             names = list(by_mod.keys())
             total = max(1, len(names))
             step = [0]
@@ -452,8 +547,18 @@ class BalancerService:
             def work(name: str) -> List[ItemSpec]:
                 if self._stop.is_set():
                     return []
-                return process_mod(os.path.join(mods_dir, name), self.cfg, True,
-                                   backup_dir, overrides, self._stop)
+                path = os.path.join(mods_dir, name)
+                expected = self._mod_signatures.get(name)
+                if expected and os.path.isfile(path):
+                    current = os.stat(path)
+                    if expected != (current.st_size, current.st_mtime_ns):
+                        raise ValueError("Мод изменился после сканирования: %s. Сканируйте заново." % name)
+                result = apply_prepared_mod(path, by_mod[name],
+                                            self.cfg, backup_dir, self._stop)
+                if os.path.isfile(path):
+                    current = os.stat(path)
+                    self._mod_signatures[name] = (current.st_size, current.st_mtime_ns)
+                return result
 
             for name, res in self._imap(work, names, overrides):
                 step[0] += 1
@@ -464,12 +569,15 @@ class BalancerService:
                     else:
                         untouched += 1
             emit("applied", {"count": written, "unchanged": untouched,
-                             "mods": len(names), "aborted": self._stop.is_set()})
+                             "mods": len(names), "aborted": self._stop.is_set(),
+                             "disk": disk_payload()})
+            self.last_error = ""
         except Exception as e:
             self.last_error = str(e)
             emit("error", {"message": f"Применение не удалось: {e}"})
         finally:
             self.busy = False
+            self._applying = False
 
     # ── Прайс-бандл: передача цен другому человеку без пересылки модов ──
     BUNDLE_FILE = "price_bundle.json"
@@ -500,6 +608,8 @@ class BalancerService:
                 "goods": int(s.goods_count or 0), "old_price": int(s.old_price or 0),
                 "src": s.price_source or "manual",
                 "patch": dict(get_spec_patches().get(s.unique_key, {})),
+                "field": {"area": s.field_area, "distance": s.field_distance}
+                         if s.item_type == "field" else None,
             })
         return {"format": "fs25balancer-bundle", "version": 1,
                 "app_version": self.app_version(), "created": time.strftime("%Y-%m-%d %H:%M"),
@@ -535,6 +645,34 @@ class BalancerService:
             return {"ok": False, "error": "Не удалось прочитать файл: %s" % e}
         if not isinstance(data, dict) or data.get("format") != "fs25balancer-bundle":
             return {"ok": False, "error": "Это не файл цен FS25 Balancer"}
+        if self.busy:
+            return {"ok": False, "error": "Дождитесь окончания текущего процесса"}
+        try:
+            if not isinstance(data.get("items"), list) or not isinstance(data.get("config", {}), dict):
+                raise ValueError("Некорректная структура файла цен")
+            for item in data["items"]:
+                if not isinstance(item, dict) or not isinstance(item.get("key"), str):
+                    raise ValueError("Некорректная позиция в файле цен")
+                value = float(item.get("price", 0))
+                if not math.isfinite(value) or value < 0 or value > 100000000000:
+                    raise ValueError("Недопустимая цена")
+                patch = item.get("patch", {})
+                if not isinstance(patch, dict):
+                    raise ValueError("Некорректные правки ТТХ")
+                for key, value in patch.items():
+                    if key == "_motors":
+                        if not isinstance(value, dict):
+                            raise ValueError("Некорректные двигатели")
+                        for index, motor in value.items():
+                            if int(index) < 0 or not isinstance(motor, dict):
+                                raise ValueError("Некорректный двигатель")
+                            if not 0 <= float(motor["hp"]) <= 3000 or not 0 <= int(motor["price_delta"]) <= 1000000000:
+                                raise ValueError("Некорректные параметры двигателя")
+                        continue
+                    if not math.isfinite(float(value)):
+                        raise ValueError("Некорректное число в ТТХ")
+        except (KeyError, TypeError, ValueError, OverflowError) as error:
+            return {"ok": False, "error": str(error)}
         self.bundle = data
         storage.save_json(self.BUNDLE_FILE, data)
         stat = self.apply_bundle_to_specs()
@@ -548,7 +686,8 @@ class BalancerService:
         data = {str(i.get("key")): i for i in (self.bundle.get("items") or [])}
         if not data:
             return stat
-        cfg_patch = dict(self.bundle.get("config") or {})
+        cfg_patch = {key: value for key, value in (self.bundle.get("config") or {}).items()
+                     if key in self.BUNDLE_CONFIG_KEYS and key != "ui_lang"}
         if cfg_patch:
             stat["applied_cfg"] = True
             self.update_config(cfg_patch)
@@ -571,8 +710,10 @@ class BalancerService:
                 info = _country_info(s.country)
                 s.country_flag = info.get("flag", s.country_flag)
             s.is_retro = bool(it.get("retro", s.is_retro))
-            patch = {str(k): float(v) for k, v in (it.get("patch") or {}).items()
-                     if isinstance(v, (int, float, str))}
+            patch, _warnings = self.validate_specs({
+                str(k): value for k, value in (it.get("patch") or {}).items() if k != "_motors"})
+            if isinstance((it.get("patch") or {}).get("_motors"), dict):
+                patch["_motors"] = it["patch"]["_motors"]
             goods = int(it.get("goods", 0) or 0)
             if goods > 0:
                 patch["goods_count"] = float(goods)
@@ -580,7 +721,17 @@ class BalancerService:
                 store = dict(get_spec_patches().get(s.unique_key, {}))
                 store.update(patch)
                 set_spec_patch(s.unique_key, store)
+                clean = {key: value for key, value in patch.items() if key != "_motors"}
+                if clean and s.item_type != "field":
+                    self.update_specs(s.unique_key, clean)
+            if s.item_type == "field" and isinstance(it.get("field"), dict):
+                values = it["field"]
+                self.patch_field(s.unique_key, values.get("area"), values.get("distance"))
+            for index, values in patch.get("_motors", {}).items():
+                self.set_motor(s.unique_key, int(index), values["hp"], values["price_delta"])
             self.reprice_item(s)
+            emit("item", s.to_dict())
+        stat["missing"] = len(set(data) - {item.unique_key for item in self.specs})
         emit("log", {"message": "Бандл: %d совпало, %d позиций из бандла здесь не найдено"
                      % (stat["matched"], len(data) - stat["matched"])})
         persist()
@@ -651,6 +802,8 @@ class BalancerService:
         s.prod_cost_month = round(sum(p.costs_per_active_month for p in s.productions), 2)
 
     def set_country(self, key: str, country: str) -> Dict[str, Any]:
+        if country not in self.cfg.selected_countries:
+            return {"ok": False, "error": "Страна не входит в выбранный пул"}
         with self._lock:
             for s in self.specs:
                 if s.unique_key != key:
@@ -685,8 +838,10 @@ class BalancerService:
         src = source if source in ("manual", "motor") else "manual"
         try:
             p = int(float(price))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             return {"ok": False, "error": "Цена должна быть числом"}
+        if p > 100000000000:
+            return {"ok": False, "error": "Цена слишком велика"}
         if p <= 0:
             return self.clear_price(key)
         with self._lock:
@@ -715,6 +870,8 @@ class BalancerService:
         return {"ok": False, "error": "Элемент не найден"}
 
     def set_motor(self, key: str, index: int, hp: float, price_delta: int) -> Dict[str, Any]:
+        if not math.isfinite(float(hp)) or not 0 <= float(hp) <= 3000 or not 0 <= int(price_delta) <= 1000000000:
+            return {"ok": False, "error": "Некорректные параметры двигателя"}
         with self._lock:
             for s in self.specs:
                 if s.unique_key != key:
@@ -724,8 +881,16 @@ class BalancerService:
                         continue
                     m.hp = max(0.0, float(hp))
                     m.price_delta = max(0, int(price_delta))
+                    patch = dict(get_spec_patches().get(key, {}))
+                    motors = dict(patch.get("_motors", {}))
+                    motors[str(index)] = {"hp": m.hp, "price_delta": m.price_delta}
+                    patch["_motors"] = motors
+                    set_spec_patch(key, patch)
+                    if index == 0:
+                        s.hp = m.hp
                     self.raw_cache.setdefault(key, {})["hp"] = (
                         m.hp if m.index == 0 else self.raw_cache.get(key, {}).get("hp", s.hp))
+                    self.reprice_item(s)
                     s.motor_prices = [
                         {"index": mm.index, "label": mm.label, "hp": mm.hp,
                          "speed": mm.max_speed, "delta": mm.price_delta,
@@ -754,12 +919,31 @@ class BalancerService:
             return calc_placeable_price(
                 cat, s.title, s.xml_rel_path,
                 float(raw.get("cap", 0.0) or 0.0), int(raw.get("slots", 0) or 0),
-                float(raw.get("prod", 0.0) or 0.0), self.cfg.k_placeable,
-                self.cfg.global_difficulty_scale)
+                self._production_cost(s, raw), self.cfg.k_placeable,
+                self.cfg.global_difficulty_scale,
+                prod_throughput=self._production_throughput(s, raw),
+                goods_count=int(raw.get("goods", s.goods_count) or 0),
+                storage_capacity=float(raw.get("scap", s.storage_capacity) or 0),
+                prod_input=float(raw.get("in", s.prod_input) or 0),
+                prod_output=float(raw.get("out", s.prod_output) or 0))
         return calc_vehicle_price(
             cat, float(raw.get("hp", 0.0) or 0.0), float(raw.get("spd", 0.0) or 0.0),
             float(raw.get("cap", 0.0) or 0.0), float(raw.get("ww", 0.0) or 0.0),
             float(raw.get("nhp", 0.0) or 0.0), 1.0, self.cfg.global_difficulty_scale)
+
+    @staticmethod
+    def _production_cost(s: ItemSpec, raw: Dict[str, Any]) -> float:
+        cost = float(raw.get("prod", s.production_cost) or 0)
+        return max(0.0, cost + (float(raw.get("month", s.prod_cost_month) or 0) - s.prod_cost_month) / 24)
+
+    @staticmethod
+    def _production_throughput(s: ItemSpec, raw: Dict[str, Any]) -> float:
+        current = sum(line.throughput for line in s.productions)
+        cycles = float(raw.get("cycles", s.prod_cycles) or 0)
+        output = float(raw.get("out", s.prod_output) or 0)
+        if s.prod_cycles > 0 and s.prod_output > 0:
+            return current * cycles / s.prod_cycles * output / s.prod_output
+        return cycles * output
 
     @staticmethod
     def _n(v: float) -> str:
@@ -921,6 +1105,7 @@ class BalancerService:
             rk = self.SPEC_RAW_KEYS.get(k)
             if rk:
                 raw[rk] = float(v)
+        raw["thr"] = self._production_throughput(s, raw)
         return raw
 
     def preview_specs(self, key: str, patch: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -987,6 +1172,8 @@ class BalancerService:
                 s.needed_hp = clean["needed_hp"]
             if "production_cost" in clean:
                 s.production_cost = clean["production_cost"]
+            if "prod_cost_month" in clean:
+                s.production_cost = max(0.0, s.production_cost + (clean["prod_cost_month"] - s.prod_cost_month) / 24)
             if "prod_cycles" in clean:
                 self._scale_lines(s, "cycles_per_hour", clean["prod_cycles"])
             if "prod_output" in clean:
@@ -1057,7 +1244,7 @@ class BalancerService:
                         a = float(area)
                     except (TypeError, ValueError):
                         return {"ok": False, "error": "Площадь должна быть числом"}
-                    if a < 0 or a > 5000:
+                    if not math.isfinite(a) or a < 0 or a > 5000:
                         return {"ok": False, "error": "Площадь вне диапазона 0..5000 га"}
                     s.field_area = a
                     s.field_manual = True
@@ -1066,6 +1253,8 @@ class BalancerService:
                         d = float(distance)
                     except (TypeError, ValueError):
                         return {"ok": False, "error": "Дистанция должна быть числом"}
+                    if not math.isfinite(d):
+                        return {"ok": False, "error": "Дистанция должна быть конечным числом"}
                     s.field_distance = -1.0 if d < 0 else min(50.0, max(0.0, d))
                     s.field_manual = True
                 ok_area = s.field_area > 0
@@ -1086,6 +1275,8 @@ class BalancerService:
         if s.unique_key not in self.overrides:
             s.new_price = clean_round(base * xm)
         s.new_price_rub = rub_from_xml(s.new_price, self.cfg)
+        self.raw_cache[s.unique_key] = _raw_of(s)
+        recalc_specs([s], self.cfg, self.overrides, self.raw_cache)
 
     @staticmethod
     def _clean_multipliers(raw: Dict[str, Any]) -> Dict[str, float]:

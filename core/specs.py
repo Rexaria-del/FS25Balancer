@@ -135,7 +135,12 @@ def present_fields(root: ET.Element, item_type: str) -> List[str]:
         if root.findall(".//slots/slot") or root.findall(".//stalls/stall"):
             out.append("slots")
         if root.findall(".//productions/production"):
-            out.append("production_cost")
+            out.extend(("prod_cycles", "prod_output",
+                        "prod_input", "prod_cost_month"))
+        if root.findall(".//storage"):
+            out.append("storage_capacity")
+        if root.find(".//sellingStation") is not None:
+            out.append("goods_count")
     return [k for k in out if k in SPEC_FIELDS]
 
 
@@ -151,10 +156,16 @@ def _patch_hp(root: ET.Element, sd: ET.Element, v: float) -> None:
         if old <= 0:
             continue
         c.set("hp", _fmt(max(0.0, old + delta)))
+        motor = c.find("motor")
+        torque = _num(motor.get("torqueScale")) if motor is not None else 0.0
+        if motor is not None and old > 0 and torque > 0:
+            motor.set("torqueScale", _fmt(torque * max(0.0, old + delta) / old))
 
 
-def _patch_speed(sd: ET.Element, v: float) -> None:
+def _patch_speed(root: ET.Element, sd: ET.Element, v: float) -> None:
     _set_child(sd, "maxSpeed", v)
+    for motor in root.findall(".//motorConfiguration/motor"):
+        motor.set("maxForwardSpeed", _fmt(v))
 
 
 def _patch_capacity(root: ET.Element, sd: ET.Element, v: float, item_type: str) -> int:
@@ -207,6 +218,45 @@ def _patch_production(root: ET.Element, v: float) -> int:
     return len(prods)
 
 
+def _prod_nodes(root: ET.Element) -> List[ET.Element]:
+    return root.findall(".//productions/production")
+
+
+def _line_children(root: ET.Element, tag: str) -> List[ET.Element]:
+    return root.findall("./" + tag) + root.findall("./" + tag + "s/" + tag)
+
+
+def _scale_attr(nodes: List[ET.Element], attribute: str, total: float) -> int:
+    if not nodes:
+        return 0
+    current = sum(_num(node.get(attribute)) for node in nodes)
+    for node in nodes:
+        value = total * _num(node.get(attribute)) / current if current > 0 else total / len(nodes)
+        node.set(attribute, _fmt(round(value, 6)))
+    return len(nodes)
+
+
+def _patch_cycles(root: ET.Element, value: float) -> int:
+    return _scale_attr(_prod_nodes(root), "cyclesPerHour", value)
+
+
+def _patch_month_cost(root: ET.Element, value: float) -> int:
+    return _scale_attr(_prod_nodes(root), "costsPerActiveMonth", value)
+
+
+def _patch_storage_cap(root: ET.Element, value: float) -> int:
+    targets = []
+    for storage in root.findall(".//storage"):
+        capacities = storage.findall("./capacity")
+        if capacities:
+            targets.extend(capacities)
+        elif storage.get("capacity") is not None:
+            targets.append(storage)
+        else:
+            targets.extend(storage.findall("./node"))
+    return _scale_attr(targets, "capacity", value)
+
+
 def apply_patch(root: ET.Element, patch: Dict[str, Any], item_type: str) -> Tuple[List[str], List[str]]:
     """Пишет патч в дерево XML (в памяти). Возвращает (применённые поля, предупреждения)."""
     sd = root.find("storeData")
@@ -228,7 +278,7 @@ def apply_patch(root: ET.Element, patch: Dict[str, Any], item_type: str) -> Tupl
         if key == "hp":
             _patch_hp(root, sd, val)
         elif key == "max_speed":
-            _patch_speed(sd, val)
+            _patch_speed(root, sd, val)
         elif key == "capacity":
             n = _patch_capacity(root, sd, val, item_type)
         elif key == "working_width":
@@ -242,9 +292,7 @@ def apply_patch(root: ET.Element, patch: Dict[str, Any], item_type: str) -> Tupl
         elif key in ("prod_output", "prod_input"):
             tag = "output" if key == "prod_output" else "input"
             nodes = _prod_nodes(root)
-            each = val / max(1, len(nodes))
-            for pr in nodes:
-                n += _scale_attr(_line_children(pr, tag), "amount", each)
+            n = _scale_attr([child for line in nodes for child in _line_children(line, tag)], "amount", val)
         elif key == "prod_cost_month":
             n = _patch_month_cost(root, val)
         elif key == "storage_capacity":

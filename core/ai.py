@@ -13,6 +13,7 @@ OLLAMA_HOST = "http://localhost:11434"
 AI_BRAND_CACHE: Dict[str, str] = {}
 # Читер-вердикты ИИ: ключ позиции -> (is_cheat, краткая причина)
 AI_CHEAT_HINTS: Dict[str, tuple] = {}
+_SPEC_CHEAT_CACHE: Dict[str, tuple] = {}
 
 DEFAULT_AI_PROMPT = (
     "Ты — эксперт по классификации модов Farming Simulator 25.\n"
@@ -25,8 +26,8 @@ DEFAULT_AI_PROMPT = (
     "РАЗРЕШЁННЫЕ СТРАНЫ (выбери ровно одну, строго из этого списка, "
     "название повторяя символ в символ):\n{countries}\n\n"
     "ПРАВИЛА:\n"
-    "1. Учитывай только список выше. Если производитель из списка отсутствует, "
-    "укажи наиболее близкую по рынку страну из списка.\n"
+    "1. Учитывай только список выше. Если производитель из списка отсутствует "
+    "или данных недостаточно, верни UNKNOWN|MODERN|CLEAN для ручной проверки.\n"
     "2. РЕТРО = техника до 1991 года выпуска, советские/постсоветские модели "
     "(Т-40, ДТ-75, К-700, ЗИЛ, ГАЗ-53, МТЗ-50/80, УАЗ-469, КРАЗ, Дон-1500), "
     "а также vintage/classic-реплики. Иначе — MODERN.\n"
@@ -37,7 +38,7 @@ DEFAULT_AI_PROMPT = (
     "ФОРМАТ ОТВЕТА — ровно одна строка, без пояснений:\n"
     "СТРАНА|RETRO|CLEAN  или  СТРАНА|MODERN|CHEAT|краткая причина\n"
     "Примеры: Россия|RETRO|CLEAN   Германия|MODERN|CHEAT|3000 л.с. у трактора\n"
-    "Если сомневаешься в стране — всё равно выбери одну из списка.\n"
+    "Не выдумывай страну при недостатке данных.\n"
     "Ответ:"
 )
 
@@ -51,7 +52,7 @@ DEFAULT_AI_PROMPT_EN = (
     "  Title: {title}\n\n"
     "ALLOWED COUNTRIES (pick exactly one, copy the name character by character):\n{countries}\n\n"
     "RULES:\n"
-    "1. Use only the list above. If the maker is missing, pick the closest market country.\n"
+    "1. Use only the list above. If the maker is missing or uncertain, return UNKNOWN|MODERN|CLEAN for manual review.\n"
     "2. RETRO = models built before 1991, Soviet/post-Soviet machines "
     "(T-40, DT-75, K-700, ZIL, GAZ-53, MTZ-50/80, UAZ-469, KRAZ, Don-1500) "
     "and vintage/classic replicas. Otherwise MODERN.\n"
@@ -185,11 +186,11 @@ def stop_ollama(cb: Callable[[str], None], also_tray: bool = False) -> None:
 
 
 def download_model(name: str, prog_cb: Callable[[Any], None],
-                   done_cb: Callable[[str], None]) -> None:
+                   done_cb: Callable[[str], None]) -> bool:
     """Pull через /api/pull (stream): проценты, скорость, прогресс по слоям."""
     if not start_ollama(lambda m: prog_cb({"msg": str(m)})):
         done_cb("Не удалось запустить Ollama.")
-        return
+        return False
     try:
         payload = json.dumps({"name": name, "stream": True}).encode("utf-8")
         req = urllib.request.Request(f"{OLLAMA_HOST}/api/pull", data=payload,
@@ -202,6 +203,8 @@ def download_model(name: str, prog_cb: Callable[[Any], None],
                 except ValueError:
                     continue
                 status = str(j.get("status", ""))
+                if j.get("error"):
+                    raise RuntimeError(str(j["error"]))
                 comp, tot = j.get("completed"), j.get("total")
                 info: Dict[str, Any] = {"msg": f"[{name}] {status}"}
                 if comp is not None and tot:
@@ -217,8 +220,10 @@ def download_model(name: str, prog_cb: Callable[[Any], None],
                                        else f"{mbps / 1024:.2f} ГБ/с"))
                 prog_cb(info)
         done_cb(f"✅ Модель '{name}' загружена!")
+        return True
     except Exception as e:
         done_cb(f"Ошибка: {e}")
+        return False
 
 
 def delete_model(name: str, cb: Callable[[str], None],
@@ -257,10 +262,49 @@ def ai_cheat_hint(brand: str, title: str, filename: str, mod_name: str) -> tuple
     return AI_CHEAT_HINTS.get(ai_key(brand, title, filename, mod_name), (False, ""))
 
 
+def assess_specs(brand: str, title: str, filename: str, mod_name: str,
+                 values: Dict[str, Any], cfg: BalancerConfig) -> tuple:
+    if not (cfg.cheat_detect and cfg.cheat_use_ai and cfg.use_local_ai):
+        return False, ""
+    encoded = json.dumps(values, sort_keys=True, allow_nan=False)
+    cache_key = cfg.ai_model_name + "|" + title + "|" + encoded
+    if cache_key in _SPEC_CHEAT_CACHE:
+        return _SPEC_CHEAT_CACHE[cache_key]
+    running, models = check_ollama()
+    if not running or not any(model == cfg.ai_model_name or model.split(":")[0] == cfg.ai_model_name for model in models):
+        return False, ""
+    prompt = (
+        "Review Farming Simulator 25 mod specifications for implausible balance. "
+        "Do not flag powerful real machines solely because they are powerful. "
+        "Judge the specific machine class and the actual numeric specifications. "
+        "Cycles per hour alone do not prove cheating: consider input and output amounts. "
+        "Return one line CLEAN or CHEAT|brief reason in " +
+        ("English" if cfg.ui_lang == "en" else "Russian") +
+        ".\nMod: " + mod_name + "\nBrand: " + brand + "\nName: " + title +
+        "\nSpecifications: " + encoded)
+    request = urllib.request.Request(
+        OLLAMA_HOST + "/api/generate",
+        data=json.dumps({"model": cfg.ai_model_name, "prompt": prompt,
+                         "stream": False, "options": {"temperature": 0, "num_predict": 100}}).encode("utf-8"),
+        headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            answer = str(json.loads(response.read()).get("response", "")).strip()
+        parts = answer.split("|", 1)
+        result = (parts[0].strip().upper() == "CHEAT", parts[1].strip()[:240] if len(parts) > 1 else "")
+        _SPEC_CHEAT_CACHE[cache_key] = result
+        AI_CHEAT_HINTS[ai_key(brand, title, filename, mod_name)] = result
+        return result
+    except Exception:
+        return False, ""
+
+
 def build_prompt(pro_data: Dict[str, Any], countries: List[str], brand: str,
                  title: str, filename: str, mod_name: str, lang: str = "ru") -> str:
     default = DEFAULT_AI_PROMPT_EN if norm_lang(lang) == "en" else DEFAULT_AI_PROMPT
     tpl = (pro_data or {}).get("custom_prompt") or default
+    if norm_lang(lang) == "en" and tpl == DEFAULT_AI_PROMPT:
+        tpl = DEFAULT_AI_PROMPT_EN
     need = {"countries", "brand", "title", "filename", "mod_name"}
     available = {f for f in re.findall(r"\{(\w+)\}", tpl)}
     if not available or not need.issubset(available):
@@ -291,7 +335,7 @@ def ask_ai_classification(brand: str, title: str, filename: str, mod_name: str,
     """Возвращает (страна, is_retro, причина)."""
     lang = getattr(cfg, "ui_lang", "ru")
     hkey = ai_key(brand, title, filename, mod_name)
-    key = (cfg.ai_model_name or "") + "|" + hkey
+    key = (cfg.ai_model_name or "") + "|" + ",".join(allowed) + "|" + lang + "|" + hkey
     if key in AI_BRAND_CACHE:
         parts = AI_BRAND_CACHE[key].split("|")
         country = parts[0] if parts else None
@@ -349,7 +393,7 @@ def detect_country_and_retro(brand: str, title: str, filename: str, mod_name: st
 
     if cb and cb not in ("lizard", "none", "generic", "") and cb in learned:
         country = learned[cb].split("|")[0]
-        if country in ALL_COUNTRIES:
+        if country in allowed:
             info = country_info(country)
             # Ретро берём из самой позиции, а не из памяти бренда:
             # у одной марки выпускаются и ретро, и современные модели.
@@ -517,9 +561,7 @@ def recommend_model(hw: Optional[Dict[str, Any]] = None,
     """(имя, причина, hw) — крупнейшая модель, влезающая в память с запасом."""
     lang = norm_lang(lang)
     hw = hw or hardware_info()
-    budget = max(1.0, hw["ram_gb"] - 3.0)
-    if hw["gpu_gb"] >= 3:
-        budget = max(budget, min(hw["ram_gb"] - 2.0, hw["gpu_gb"] - 1.0))
+    budget = max(1.0, hw["gpu_gb"] - 1.0) if hw["gpu_gb"] >= 3 else max(1.0, hw["ram_gb"] - 3.0)
     feas = [m for m in MODEL_CATALOG if m["gb"] * 1.2 + 1.0 <= budget]
     best = (max(feas, key=lambda m: (MODEL_RANKS.get(m["name"], 0), m["gb"]))
             if feas else min(MODEL_CATALOG, key=lambda m: m["gb"]))
@@ -550,7 +592,8 @@ def model_catalog(lang: str = "ru") -> Dict[str, Any]:
         models = installed_models_disk()
     rec, reason, hw = recommend_model(lang=lang)
     gb = t("unit.gb", lang)
-    cat = [dict(m, size="{0:.1f} {1}".format(m["gb"], gb),
+    cat = [dict(m, desc=m.get("desc_en", m["desc"]) if lang == "en" else m["desc"],
+                size="{0:.1f} {1}".format(m["gb"], gb),
                 rank=MODEL_RANKS.get(m["name"], 0), lang=lang)
            for m in MODEL_CATALOG]
     return {"running": ok, "installed": models, "catalog": cat,

@@ -4,6 +4,7 @@
 import json
 import os
 import shutil
+import threading
 from typing import Any, Dict, Optional
 
 APP_NAME = "FS25Balancer"
@@ -16,6 +17,7 @@ PLACEABLES_FILE = "learned_placeables.json"
 COUNTRIES_FILE = "selected_countries.json"
 LAST_SCAN_FILE = "last_scan.json"
 SPEC_PATCH_FILE = "spec_patches.json"
+_save_lock = threading.RLock()
 
 
 def data_dir() -> str:
@@ -61,18 +63,27 @@ def load_json(name: str, default: Optional[Any] = None) -> Any:
 def save_json(name: str, data: Any) -> bool:
     p = _path(name)
     tmp = p + ".tmp"
-    try:
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-        os.replace(tmp, p)
-        return True
-    except Exception:
+    with _save_lock:
         try:
-            if os.path.exists(tmp):
-                os.remove(tmp)
+            encoded = json.dumps(data, ensure_ascii=False, indent=2,
+                                 allow_nan=False).encode("utf-8")
+            if os.path.isfile(p):
+                with open(p, "rb") as current:
+                    if current.read() == encoded:
+                        return True
+            with open(tmp, "wb") as target:
+                target.write(encoded)
+                target.flush()
+                os.fsync(target.fileno())
+            os.replace(tmp, p)
+            return True
         except Exception:
-            pass
-        return False
+            try:
+                if os.path.exists(tmp):
+                    os.remove(tmp)
+            except OSError:
+                pass
+            return False
 
 
 def path_of(name: str) -> str:

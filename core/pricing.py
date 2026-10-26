@@ -151,7 +151,8 @@ def calc_placeable_price_ex(category: str, title: str, filename: str,
                             capacity: float, slots: int, prod_cost: float,
                             k_place: float, gs: float,
                             prod_throughput: float = 0.0, goods_count: int = 0,
-                            storage_capacity: float = 0.0, lang: str = "ru") -> Tuple[float, List[Dict[str, Any]]]:
+                            storage_capacity: float = 0.0, lang: str = "ru",
+                            prod_input: float = 0.0, prod_output: float = 0.0) -> Tuple[float, List[Dict[str, Any]]]:
     """Цена здания + честная цепочка разбора (видно пользователю всегда).
 
     Вместимость наружных резервуаров и внутренних складов завода не суммируется дважды:
@@ -174,7 +175,7 @@ def calc_placeable_price_ex(category: str, title: str, filename: str,
     goods_mult = goods_multiplier(goods_count)
 
     sum_part = base + cap_bonus + slot_bonus + prod_bonus
-    running = sum_part
+    running = base
     steps: List[Dict[str, Any]] = [
         chain_step(_t("bd.base", lang),
                    "%s · %s" % (_cat_label(cat_key, lang, cat_key), "{0:,.0f}".format(base)),
@@ -206,6 +207,13 @@ def calc_placeable_price_ex(category: str, title: str, filename: str,
         steps.append(chain_step(_t("bd.cycles", lang),
                                 "{0:,.0f} л/ч".format(prod_throughput), thr_mult, "x", running))
 
+    if prod_input > 0 and prod_output > 0:
+        efficiency = min(1.25, max(0.8, (prod_output / prod_input) ** 0.15))
+        running *= efficiency
+        steps.append(chain_step(
+            "Материальная отдача" if lang == "ru" else "Material yield",
+            "{:g} / {:g}".format(prod_output, prod_input), efficiency, "x", running))
+
     if abs(goods_mult - 1.0) > 1e-6:
         running *= goods_mult
         steps.append(chain_step(_t("bd.goods", lang), str(int(goods_count or 0)),
@@ -226,11 +234,13 @@ def calc_placeable_price(category: str, title: str, filename: str,
                          capacity: float, slots: int, prod_cost: float,
                          k_place: float, gs: float,
                          prod_throughput: float = 0.0, goods_count: int = 0,
-                         storage_capacity: float = 0.0) -> float:
+                         storage_capacity: float = 0.0, prod_input: float = 0.0,
+                         prod_output: float = 0.0) -> float:
     """Совместимость со старыми вызовами: только цена, без цепочки."""
     price, _steps = calc_placeable_price_ex(category, title, filename, capacity, slots,
                                             prod_cost, k_place, gs, prod_throughput,
-                                            goods_count, storage_capacity)
+                                            goods_count, storage_capacity,
+                                            prod_input=prod_input, prod_output=prod_output)
     return price
 
 
@@ -272,9 +282,9 @@ def finish_chain(inner: List[Dict[str, Any]], base_eur: float, country_mult: flo
     """Достраивает разбор цены: страна → ретро → округление → запись в XML → рубли."""
     from core.i18n import t as _t
     steps = list(inner or [])
-    if manual:
-        return steps + [chain_step(_t("bd.manual", lang), "", float(new_xml), "=", new_xml)]
     steps += multiplier_chain_steps(base_eur, country_mult, is_retro, k_retro, lang)
+    if manual:
+        steps.append(chain_step(_t("bd.manual", lang), "", float(new_xml), "=", new_xml))
     steps.append(chain_step(_t("bd.round", lang), "x{0:,.2f}".format(float(xml_factor or 1.0)),
                             float(xml_factor or 1.0), "=", float(new_xml)))
     steps.append(chain_step(_t("bd.to_rub", lang), "", 0.0, "=>", float(new_rub)))

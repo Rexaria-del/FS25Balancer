@@ -12,10 +12,22 @@ from core.i18n import lang_list, norm_lang, scan_target_label, subgroup_label
 from core.service import BalancerService, drain_events
 from core.models import (SCAN_CATEGORY_KEYS, SCAN_TARGET_LABELS, SUBGROUP_ORDER, ScanTarget)
 
-APP_VERSION_STR = "15.5"
+APP_VERSION_STR = "16.0"
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 CHANGELOG = [
+    {"v": "16.0", "date": "2026-10-26", "items": [
+        "Русский и английский интерфейс, подсказки и обучение; переключатель RU / EN",
+        "Выбор категорий перед сканированием и подгрупп зданий в таблице",
+        "Редактор производств: циклы в час, сырьё, выпуск, расходы и внутренний склад",
+        "Цена точек продажи зависит от числа принимаемых типов продукции",
+        "Отключаемая проверка баланса: ручные пороги, ИИ и подтверждение подозрительных модов",
+        "Групповое назначение страны, Shift-выбор и веб-поиск из контекстного меню",
+        "Экспорт и импорт цен и ТТХ небольшим JSON вместо передачи всего модпака",
+        "Точечная запись ZIP с журналом восстановления; бэкапы только изменяемых XML",
+        "Повторное применение без изменений не записывает моды и настройки заново",
+        "Счётчик записанных байт, фоновый откат из бэкапа и восстановленные редакторы таблицы",
+    ]},
     {"v": "15.0", "date": "2026-10-25", "items": [
         "Полный переход на PyWebView (HTML5/CSS3/JS) — glassmorphism, анимации",
         "177 стран мира + СССР, мультиселект с тегами",
@@ -251,6 +263,9 @@ class Api:
     def bundle_status(self) -> dict:
         return self._svc.bundle_status()
 
+    def restore_backup(self) -> dict:
+        return self._svc.restore_backup()
+
     def clear_bundle(self) -> dict:
         r = self._svc.clear_bundle()
         if isinstance(r, dict) and r.get("ok"):
@@ -393,7 +408,19 @@ class Api:
             ok, models = ai_mod.check_ollama(force=True)
             if not any(str(model) in m for m in models):
                 prog(f"Скачиваю модель {model}…")
-                ai_mod.download_model(str(model), prog, prog)
+                if not ai_mod.download_model(str(model), prog, prog):
+                    emit("ai_done", {"msg": "Не удалось скачать модель"})
+                    return
+            prog({"msg": "Загрузка модели в память GPU / RAM…", "pct": None, "phase": "loading"})
+            import urllib.request
+            request = urllib.request.Request(ai_mod.OLLAMA_HOST + "/api/generate",
+                data=json.dumps({"model": str(model), "prompt": "", "stream": False,
+                                 "keep_alive": "10m"}).encode("utf-8"),
+                headers={"Content-Type": "application/json"})
+            with urllib.request.urlopen(request, timeout=180) as response:
+                loaded = json.loads(response.read())
+            if loaded.get("error"):
+                raise RuntimeError(str(loaded["error"]))
             self._svc.update_config({"ai_model_name": str(model), "use_local_ai": True})
             self._refresh_ai()
             emit("ai_done", {"msg": f"Модель {model} готова — ИИ включён"})
@@ -514,6 +541,8 @@ class Api:
 def _setup_crashlog():
     import datetime, faulthandler, traceback
     path = storage.path_of("crash.log")
+    if os.path.isfile(path) and os.path.getsize(path) > 2 * 1024 * 1024:
+        os.replace(path, path + ".previous")
     logf = open(path, "a", encoding="utf-8", buffering=1)
     print("=== start", datetime.datetime.now().isoformat(timespec="seconds"), "===", file=logf)
     def hook(exc_type, exc, tb):
@@ -535,9 +564,11 @@ def _cancel_dump():
 
 def _setup_pywebview_log():
     import logging
+    from logging.handlers import RotatingFileHandler
     lg = logging.getLogger("pywebview")
-    lg.setLevel(logging.DEBUG)
-    fh = logging.FileHandler(storage.path_of("webview.log"), encoding="utf-8")
+    lg.setLevel(logging.DEBUG if os.environ.get("FS25_DEBUG") else logging.WARNING)
+    fh = RotatingFileHandler(storage.path_of("webview.log"), maxBytes=1048576,
+                             backupCount=1, encoding="utf-8")
     fh.setFormatter(logging.Formatter("%(asctime)s %(threadName)s %(levelname)s %(message)s"))
     lg.addHandler(fh)
     return fh
@@ -570,13 +601,18 @@ def _ensure_webview2() -> bool:
 
 
 def main():
+    if "--smoke-test" in sys.argv:
+        from core.smoke import run
+        run()
+        return
     # WebView2 иначе кэширует app.js/app.css между запусками — фиксы не долетают до пользователя
     os.environ.setdefault("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
                           "--disable-http-cache --autoplay-policy=no-user-gesture-required")
     logf = _setup_crashlog()
     _setup_pywebview_log()
     print("[boot] crashlog:", logf.name, flush=True)
-    _ensure_webview2()
+    if not _ensure_webview2():
+        return
     init_state()
     print("[boot] state ready", flush=True)
     api = Api()

@@ -1,7 +1,21 @@
 /* ── утилиты ── */
 const $ = (sel, root) => (root || document).querySelector(sel);
 const $$ = (sel, root) => Array.from((root || document).querySelectorAll(sel));
+const S = {
+  boot: null, items: new Map(), order: [], selected: new Set(),
+  filter: "all", query: "", busy: false, subgroups: new Set(),
+  brandTab: null, tourStep: -1, probed: false,
+};
+let ttxKey = null, ttxTimer = null, previewRequest = 0;
+const fmt2 = value => Number(value || 0).toFixed(2).replace(/0+$/, "").replace(/\.$/, "");
 const fmt = n => { n = Math.round(Number(n) || 0); return n.toString().replace(/\B(?=(\d{3})+(?!\d))/g, "\u2009"); };
+const fmtBytes = n => {
+  n = Number(n) || 0;
+  if (n < 1024) return Math.round(n) + " Б";
+  if (n < 1048576) return (n / 1024).toFixed(n < 10240 ? 1 : 0) + " КБ";
+  if (n < 1073741824) return (n / 1048576).toFixed(1) + " МБ";
+  return (n / 1073741824).toFixed(2) + " ГБ";
+};
 const esc = s => String(s == null ? "" : s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 const clampNum = (v, min, max, def) => {
   const n = parseFloat(String(v).replace(",", "."));
@@ -231,7 +245,7 @@ async function bootInner() {
   $("#modsDir").value = b.config.mods_dir || b.default_mods_dir || "";
   $("#crumbs").textContent = b.config.mods_dir || "папка mods не выбрана";
 
-  fillScanTargets(b.scan_targets, b.config.scan_target);
+  fillScanTargets(b.scan_categories, b.config.scan_targets);
   applyConfigToUI(b.config);
   renderMultiserial();
   renderMultList();
@@ -239,6 +253,7 @@ async function bootInner() {
   checkAi();
   (b.items || []).forEach(putItem);
   renderTable();
+  applyLanguage(b.config.ui_lang);
 
   renderBundleInfo();
   setTimeout(async () => {
@@ -254,11 +269,18 @@ async function bootInner() {
 }
 
 function fillScanTargets(list, current) {
-  $("#scanTarget").innerHTML = (list || []).map(t =>
-    `<option value="${t.key}"${t.key === current ? " selected" : ""}>${esc(t.label)}</option>`).join("");
+  const selected = new Set(current || []);
+  $("#scanTarget").innerHTML = (list || []).map(target =>
+    `<label class="country-option"><input type="checkbox" value="${esc(target.key)}"
+    ${selected.has(target.key) ? "checked" : ""}> ${esc(target.label)}</label>`).join("");
 }
 
 function applyConfigToUI(c) {
+  if ($("#cheatDetect")) {
+    $("#cheatDetect").checked = !!c.cheat_detect;
+    $("#cheatAi").checked = !!c.cheat_use_ai;
+    $$("[data-limit]").forEach(input => { input.value = Number(c[input.dataset.limit]) || 0; });
+  }
   $("#place").value = c.k_placeable;
   $("#fieldK").value = c.k_field;
   $("#retroK").value = Math.round(c.k_retro * 100);
@@ -278,7 +300,7 @@ function applyConfigToUI(c) {
   { const t = $("#aiModelCurTxt"); if (t && c.ai_model_name) t.textContent = c.ai_model_name; }
   $("#shopX").value = (c.shop_coordinates.shop || [0, 0])[0];
   $("#shopZ").value = (c.shop_coordinates.shop || [0, 0])[1];
-  $("#scanTarget").value = c.scan_target;
+  $$("#scanTarget input").forEach(input => { input.checked = (c.scan_targets || []).includes(input.value); });
   $("#vPlace").textContent = Number(c.k_placeable).toFixed(2);
   $("#vField").textContent = Number(c.k_field).toFixed(2);
   $("#vRetroK").textContent = Math.round(c.k_retro * 100);
@@ -348,7 +370,7 @@ function handleEvent(ev) {
           d.aborted ? "warn" : "ok");
       toast(d.apply ? "ok" : "info",
         `Найдено ${d.found}: 🚜 ${d.stats.vehicles} · 🏗️ ${d.stats.placeables} · 🌾 ${d.stats.fields}` +
-        (d.stats.retro ? ` · 🕰️ ${d.stats.retro}` : "") + ` за ${d.stats.elapsed} с`, 6000);
+        (d.stats.retro ? ` · 🕰️ ${d.stats.retro}` : "") + ` за ${d.stats.elapsed} с` + (d.disk && d.disk.written ? ` · 💽 ${fmtBytes(d.disk.written)}` : ""), 6000);
       if (d.uncertain && d.uncertain.length) {
         toast("warn", `⚠️ ${d.uncertain.length} позиций требуют проверки — см. фильтр «Проверить»`, 7000);
         S.boot.uncertain = d.uncertain;
@@ -359,8 +381,11 @@ function handleEvent(ev) {
       $("#progress").hidden = false;
       break;
     case "applied_start":
-      setBusy(true, "Запись в моды…");
+      setBusy(true, d.restore ? "Откат из бэкапа…" : "Запись в моды…");
       $("#progress").hidden = false;
+      $("#progFill").style.width = "0%";
+      $("#progPct").textContent = "0%";
+      $("#progText").textContent = d.restore ? "Восстановление исходных цен…" : "";
       break;
     case "recalc_done":
       setBusy(false);
@@ -376,13 +401,44 @@ function handleEvent(ev) {
       $("#progress").hidden = true;
       if (!d.aborted) chime("ok");
       log(d.aborted ? "Применение прервано" : `Записано в моды: ${d.count} позиций`, d.aborted ? "warn" : "ok");
-      toast(d.aborted ? "warn" : "ok", d.aborted ? "Применение прервано" : `💾 Готово: изменено ${d.count} файлов позиций`);
+      toast(d.aborted ? "warn" : "ok", d.aborted ? "Применение прервано" : `💾 ${uiText("Изменено", "Changed")}: ${d.count} · ${uiText("Записано файловой системе", "Written to filesystem")}: ${fmtBytes(d.disk?.written || 0)}`, 7000);
+      break;
+    case "restored":
+      S.items.clear(); S.order = []; S.selected.clear(); renderTable();
+      toast("info", uiText("После отката выполните новое сканирование", "Scan again after restoring the backup"));
+      break;
+    case "applied_progress":
+      if (d.total) {
+        $("#progFill").style.width = (d.done / d.total * 100).toFixed(1) + "%";
+        $("#progPct").textContent = Math.round(d.done / d.total * 100) + "%";
+      }
+      break;
+    case "applied_done":
+      setBusy(false);
+      $("#progress").hidden = true;
+      if (d.ok) {
+        chime("ok");
+        log("Откат из бэкапа завершён: " + (d.restored || 0) + " файлов", "ok");
+        toast("ok", "↺ Восстановлено из бэкапа: " + (d.restored || 0) + " файлов" +
+          (d.disk && d.disk.written ? " · 💽 " + fmtBytes(d.disk.written) : ""), 7000);
+      } else {
+        chime("err");
+        toast("err", "Откат не удался: " + (d.error || "неизвестная ошибка"), 7000);
+      }
       break;
     case "ai_status":
       checkAi();
       break;
     case "ai_progress":
       log(d.msg || "", "busy");
+      $("#aiProgress").hidden = false;
+      $("#aiProgMsg").textContent = d.msg || "";
+      $("#aiProgBar").classList.toggle("indeterminate", d.pct == null);
+      if (d.pct == null) {
+        $("#aiProgPct").textContent = uiText("Выполняется…", "Working…");
+        $("#aiProgSpeed").textContent = "";
+        $("#aiProgSize").textContent = "";
+      }
       if (d.pct != null) {
         const box = $("#aiProgress"); if (!box) break;
         box.hidden = false;
@@ -445,13 +501,13 @@ function renderAiCatalog() {
   const rest = cat.filter(m => m.name !== st.rec);
   const row = (m, pinned) => `
     <div class="ai-i${pinned ? " is-rec" : ""}"><span><b>${esc(m.name)}</b>${pinned ? ' <span class="rec-badge">✓ для твоего железа</span>' : ""}
-      <span class="dim">· ${esc(m.size)} · точность ${m.rank || 0}/100 · ${esc(m.desc)}</span></span>
+      <span class="dim">· ${esc(m.size)} · ${uiText("оценка для задач", "task fit")} ${m.rank || 0}/100 · ${esc(m.desc)}</span></span>
       <span style="display:flex;gap:6px;flex:0 0 auto">
         ${has(m.name) ? `<button class="mini" data-use="${esc(m.name)}">${st.current === m.name ? "✓ выбрана" : "выбрать"}</button>` : ""}
         <button class="mini" data-setup="${esc(m.name)}">${has(m.name) ? "⟳ заново" : "⬇ установить и использовать"}</button>
       </span></div>`;
   $("#aiList").innerHTML =
-      `<div class="hw-rec">Железо: ${esc(st.rec_reason || "не определено")}. Рекомендуем <b>${esc(st.rec || "?")}</b> — лучший баланс точности и скорости для задач программы (короткая классификация «страна/ретро» на русском).</div>
+      `<div class="hw-rec">Железо: ${esc(st.rec_reason || "не определено")}. Рекомендуем <b>${esc(st.rec || "?")}</b> — ${uiText("ориентир по доступной памяти. Оценка моделей — условный рейтинг для задач программы, не измеренная точность.", "a suggestion based on available memory. Scores describe estimated task suitability, not measured accuracy.")}</div>
       <div class="ai-sort"><span class="dim">Сортировка:</span>
         <button class="mini${S.aiSort === "weight" ? " is-on" : ""}" data-sort="weight">по весу ↓</button>
         <button class="mini${S.aiSort === "accuracy" ? " is-on" : ""}" data-sort="accuracy">по точности ↓</button>
@@ -462,10 +518,11 @@ function renderAiCatalog() {
       (inst.length ? `<div class="hr"></div><div class="dim sm">Установленные и готовые к работе модели (${inst.length}):</div>` +
         inst.map(n => {
           const ld = (st.loaded || []).find(x => x.name === n || x.name.split(":")[0] === n.split(":")[0]);
-          const gpu = ld && ld.size > 0 && ld.vram / ld.size >= 0.5;
+          const gpu = ld && ld.vram > 0;
+          const gpuShare = ld && ld.size > 0 ? Math.min(100, Math.round(ld.vram / ld.size * 100)) : 0;
           return `
         <div class="ai-i"><span>${esc(n)}${n === st.current ? ' <span class="dim"> · текущая</span>' : ""}
-          ${ld ? `<span class="vram-badge ${gpu ? "is-gpu" : "is-cpu"}" title="${gpu ? "Модель в видеопамяти — быстрый отклик" : "Модель в ОЗУ — медленнее, GPU не задействован"}">${gpu ? "⚡ GPU" : "≡ CPU"}${gpu ? " · " + fmtBytes(ld.vram) : ""}</span>` : '<span class="vram-badge is-idle">в покое</span>'}</span>
+          ${ld ? `<span class="vram-badge ${gpu ? "is-gpu" : "is-cpu"}" title="${gpu ? uiText("Доля модели в видеопамяти", "Model share in GPU memory") + ": " + gpuShare + "%" : uiText("Модель в оперативной памяти", "Model is in system RAM")}">${gpu ? (gpuShare < 100 ? "⚡ GPU + CPU" : "⚡ GPU") : "≡ CPU"}${gpu ? " · " + fmtBytes(ld.vram) : ""}</span>` : '<span class="vram-badge is-idle">в покое</span>'}</span>
           <span style="display:flex;gap:6px;flex:0 0 auto">
             <button class="mini" data-use="${esc(n)}">${st.current === n ? "✓ выбрана" : "использовать"}</button>
             <button class="mini danger" data-del="${esc(n)}">🗑 удалить</button>
@@ -583,11 +640,6 @@ function chainTitle(it) {
 "use strict";
 
 const API_PROXY = "__FS25_API__";
-const S = {
-  boot: null, items: new Map(), order: [],
-  filter: "all", query: "", busy: false,
-  brandTab: null, tourStep: -1, probed: false,
-};
 
 /* ── мост к Python ── */
 function api() {
@@ -619,6 +671,8 @@ function matches(it) {
   if (S.filter === "retro" && !it.is_retro) return false;
   if (S.filter === "review" && !it.needs_review) return false;
   if (S.filter === "manual" && !(it.price_source || it.manual_price != null)) return false;
+  if (S.filter === "cheat" && !it.is_cheat) return false;
+  if (S.filter === "placeable" && S.subgroups.size && !S.subgroups.has(it.subgroup || "other")) return false;
   if (S.query) {
     const q = S.query.toLowerCase();
     const hay = `${it.title} ${it.brand} ${it.mod_name} ${it.country} ${it.category_label}`.toLowerCase();
@@ -637,6 +691,7 @@ function renderTable() {
   $("#empty").hidden = list.length > 0;
   $("#shownCount").textContent = `${list.length} из ${S.order.length} строк`;
   updateStats();
+  renderSelection();
 }
 
 function priceCell(it) {
@@ -644,7 +699,7 @@ function priceCell(it) {
   const hasMotors = motors.length > 1;
   const src = it.price_source || "";
   const cfg = (S.boot && S.boot.config) || {};
-  const suffix = cfg.write_direct_rubles === false ? " €" : " ₽";
+  const suffix = " ₽";
   const chosen = motors.find(m => m.total === it.manual_price);
   const chip = src === "motor"
     ? `<span class="p-chip is-motor" title="Цена не ручная — выбрана комплектация. ↺ рядом вернёт базовую">⚙ ${esc((chosen && chosen.label) || "комплектация")}</span>`
@@ -659,7 +714,7 @@ function priceCell(it) {
     : "";
   return `<div class="c-new${src ? " has-src" : ""}">
       <button class="price-btn" data-price="${esc(it.unique_key)}" title="Клик — задать свою цену">
-        <b>${fmt(it.new_price)}</b><span class="cur">${suffix}</span></button>
+        <b>${fmt(it.new_price_rub)}</b><span class="cur">${suffix}</span></button>
       <span class="p-tools">${chip}${cfgs}${reset}</span></div>`;
 }
 
@@ -673,17 +728,17 @@ function rowEl(it) {
     ? `${it.field_area > 0 ? fmt1(it.field_area) + " га" : "га ?"} | ${dist}`
     : esc(it.specs_str);
   tr.innerHTML = `
-    <span class="c-type" title="${esc(it.item_type)}">${it.type_icon}</span>
+    <span class="c-type" title="${esc(it.item_type)}"><input type="checkbox" data-select="${esc(it.unique_key)}" aria-label="Select" ${S.selected.has(it.unique_key) ? "checked" : ""}>${it.type_icon}</span>
     <span class="c-mod" title="${esc(it.mod_name)}">${esc(it.mod_name)}</span>
-    <span class="c-name" title="${esc(it.title)}"><b>${esc(it.title)}</b></span>
+    <span class="c-name" title="${esc(it.title + (it.cheat_reason ? "\n" + it.cheat_reason : ""))}"><b>${it.is_cheat ? "⚠ " : ""}${esc(it.title)}</b></span>
     <span class="c-brand" title="${esc(it.brand)}">${esc(it.brand)}</span>
     <span class="c-country" data-country="${esc(it.unique_key)}" title="Двойной клик — сменить страну">
       <span class="fl">${it.country_flag}</span><em>${esc(it.country)}</em></span>
     <span class="c-retro"><span class="mini-sw${it.is_retro ? " is-on" : ""}${(S.boot && S.boot.config.retro_enabled === false) ? " is-dis" : ""}" data-retro="${esc(it.unique_key)}"
       title="Ретро: цена × коэффициент ретро"><i></i></span></span>
     <span class="c-specs" data-specs="${esc(it.unique_key)}" title="Клик или двойной клик — правка характеристик и разбор цены">${specs}</span>
-    <span class="c-old">${fmt(it.old_price)}</span>
-    <span class="c-base">${fmt(it.base_price)}</span>
+    <span class="c-old">${fmt(toRubles(it.old_price))}</span>
+    <span class="c-base" title="${esc(uiText("Цена по характеристикам до коэффициентов страны и ретро", "Price from specifications before country and retro multipliers"))}">${fmt(toRubles(it.base_price))}</span>
     ${priceCell(it)}
     <span class="c-rub">${fmt(it.new_price_rub)}</span>
     <span class="c-src" data-price="${esc(it.unique_key)}" title="${chainTitle(it)}\nклик — своя цена и разбор">${chainLine(it)}</span>`;
@@ -694,6 +749,7 @@ const fmt1 = v => Number(v || 0).toFixed(1).replace(/\.0$/, "");
 function openTtx(key) {
   const it = S.items.get(key);
   if (!it) return;
+  if (!confirmCheat([it])) return;
   ttxKey = key;
   $("#modalTitle").textContent = it.type_icon + " " + it.title + " · " + (it.category_label || it.item_type);
   let html;
@@ -747,8 +803,9 @@ function schedulePreview(delay) {
 
 async function previewNow() {
   if (!ttxKey) return;
-  const r = await call("preview_specs", ttxKey, collectPatch());
-  if (!r || !r.ok) return;
+  const key = ttxKey, request = ++previewRequest;
+  const r = await call("preview_specs", key, collectPatch());
+  if (!r || !r.ok || key !== ttxKey || request !== previewRequest) return;
   renderBreakdown(r);
 }
 
@@ -789,7 +846,11 @@ $("#modalSave").onclick = async () => {
   if (!ttxKey) return closeTtx();
   const key = ttxKey;
   const mode = $("#modalSave").dataset.mode;
-  const price = clampNum($("#mPrice").value, 0, 1000000000, 0);
+  const rawPrice = Number($("#mPrice").value);
+  if (!Number.isFinite(rawPrice) || rawPrice < 0 || rawPrice > 100000000000) {
+    return toast("err", uiText("Некорректная цена", "Invalid price"));
+  }
+  const price = fromRubles(rawPrice);
 
   if (mode === "field") {
     const p = collectPatch();
@@ -832,21 +893,23 @@ $("#modalSave").onclick = async () => {
       const rc = await call("clear_price", key);
       if (rc && rc.ok) S.items.set(key, rc.item);
     }
-    for (const el of $$("#modalBody [data-mhp]")) {
+  }
+  for (const el of $$("#modalBody [data-mhp]")) {
       const i = Number(el.dataset.mhp);
       const hpEl = $("#modalBody [data-mhp=\"" + i + "\"]");
       const prEl = $("#modalBody [data-mprice=\"" + i + "\"]");
       const lbEl = $("#modalBody [data-mlabel=\"" + i + "\"]");
-      const hp = clampNum(hpEl.value, 0, 2000, NaN);
+      const hp = clampNum(hpEl.value, 0, 3000, NaN);
       const dp = clampNum(prEl.value, 0, 1000000000, NaN);
       if (!isFinite(hp)) { markBad("#modalBody [data-mhp=\"" + i + "\"]"); return toast("err", "Л.С. комплектации " + (i + 1) + ": нужно число"); }
       if (!isFinite(dp)) { markBad("#modalBody [data-mprice=\"" + i + "\"]"); return toast("err", "Наценка " + (i + 1) + ": нужно число"); }
       const it = S.items.get(key);
+      const original = it.motors.find(motor => motor.index === i);
+      if (original && Number(original.hp) === hp && Number(original.price_delta) === Math.round(dp)) continue;
       if (lbEl && it.motors[i]) it.motors[i].label = lbEl.value || it.motors[i].label;
       const r = await call("set_motor", key, i, hp, Math.round(dp));
       if (!r || !r.ok) return toast("err", (r && r.error) || "Ошибка ТТХ двигателя");
       S.items.set(key, r.item);
-    }
   }
   patchRow(S.items.get(key));
   updateStats();
@@ -937,6 +1000,12 @@ $("#btnImport").onclick = async () => {
     applyConfigToUI(r.config);
   }
   renderBundleInfo();
+};
+
+$("#btnRestore").onclick = async () => {
+  if (!confirm("Откатить все цены к исходным?\nВосстановятся файлы из резервной копии — все правки программы будут сняты.")) return;
+  const r = await call("restore_backup");
+  if (!r || !r.ok) toast("err", (r && r.error) || "Откат невозможен");
 };
 
 /* ── мультиселект стран ── */
@@ -1124,7 +1193,11 @@ function bindSettings() {
       if (!isFinite(v)) return toast("err", "Некорректное значение слайдера");
       if (key === "k_retro" || key === "retro_wear" || key === "field_distance_spread") v = v / 100;
       const r = await call("set_config", { [key]: v });
-      if (r && r.ok) { S.boot.config = r.config; if (key.startsWith("field") || key === "adjust") drawCurve(); }
+      if (r && r.ok) {
+        S.boot.config = r.config;
+        if (key.startsWith("field") || key === "adjust") drawCurve();
+        if (S.order.length) guard(call("recalc"));
+      }
       else toast("err", (r && r.error) || "Не сохранено");
     });
   }
@@ -1188,7 +1261,12 @@ function bindSettings() {
     if (r && r.ok) { $("#modsDir").value = r.path; $("#crumbs").textContent = r.path; S.boot.config.mods_dir = r.path; }
   };
   $("#scanTarget").addEventListener("change", async e => {
-    const r = await call("set_config", { scan_target: e.target.value });
+    const keys = $$("#scanTarget input:checked").map(input => input.value);
+    if (!keys.length) {
+      e.target.checked = true;
+      return toast("warn", uiText("Выберите хотя бы одну категорию", "Select at least one category"));
+    }
+    const r = await call("set_config", { scan_targets: keys });
     if (r && r.ok) S.boot.config = r.config;
   });
   $("#btnSavePrices").onclick = () => {
@@ -1305,7 +1383,10 @@ $("#btnAiRefresh").onclick = async () => { await checkAi(); toast("info", "Сп�
 
 /* ── кнопки верхней панели ── */
 $("#btnScan").onclick = () => guard(call("scan", false));
-$("#btnApply").onclick = () => { if (confirm("Записать рассчитанные цены в файлы модов? Будут созданы резервные копии.")) guard(call("apply")); };
+$("#btnApply").onclick = () => {
+  if (!confirmCheat([...S.items.values()])) return;
+  if (confirm(uiText("Записать рассчитанные цены и ТТХ в моды? Резервируются только изменяемые XML.", "Write prices and specifications to mods? Only changed XML files are backed up."))) guard(call("apply"));
+};
 $("#btnRecalc").onclick = async () => {
   if (!S.order.length) return toast("warn", "Сначала выполни сканирование");
   const b = $("#btnRecalc");
@@ -1315,10 +1396,9 @@ $("#btnRecalc").onclick = async () => {
 };
 $("#btnStop").onclick = () => call("stop");
 function guard(p) {
+  setBusy(true, uiText("Подготовка…", "Preparing…"));
   p.then(r => {
-    if (!r) return;
-    if (r.ok) setBusy(true, "Подготовка…");
-    else { setBusy(false); toast("err", r.error || "Ошибка"); }
+    if (!r || !r.ok) { setBusy(false); if (r) toast("err", r.error || "Ошибка"); }
   });
 }
 $("#btnExportProfile").onclick = async () => {
@@ -1426,7 +1506,7 @@ function maybeTour() {
   try { localStorage.removeItem("fs25_tour_done"); } catch (e) {}
   let never = "";
   try { never = localStorage.getItem("fs25_tour_never"); } catch (e) {}
-  if (never) return;
+  if (never || S.boot.config.tour_never) return;
   setTimeout(() => requestAnimationFrame(() => requestAnimationFrame(startTour)), 560);
 }
 
@@ -1468,10 +1548,23 @@ function placeTour() {
   if (!el || !el.getBoundingClientRect().width) { S.tourStep++; return placeTour(); }
   el.scrollIntoView({ block: "center", inline: "nearest" });
   tourEl = el;
-  $("#tourTitle").textContent = "Шаг " + (S.tourStep + 1) + " из " + TOUR.length + " · " + step.title;
-  $("#tourText").textContent = step.text;
+  const englishStep = [
+    ["Scan", "Choose your mods folder, select the categories to scan, and click Scan. This only reads mod data; it does not change your files."],
+    ["Update prices", "Recalculate the current results using your country, building, field and retro multipliers. No rescan is required."],
+    ["Country pool", "Choose the countries AI and brand dictionaries may use. Each country has an individual price multiplier. Uncertain items require review."],
+    ["Change country", "Double-click a country in the table to choose a new one. Use row checkboxes and Assign country to update several items together."],
+    ["Retro", "The row switch applies the retro discount and additional wear. You can disable the entire retro mechanic in Prices."],
+    ["Custom prices", "Click a final price, enter rubles and compare it with the automatic price. Save or press Enter. The reset arrow restores automatic pricing. The engine menu offers configuration prices."],
+    ["Edit specifications", "Click Specs to edit only the parameters available for this item: power and speed, factory cycles, input/output, storage, or field area and distance. Check the live price breakdown before saving."],
+    ["Fields", "A field's base price depends on its area. Distance adds a premium near the shop. Enter missing area and distance manually in the field editor."],
+    ["Apply changes", "Apply writes your prices and edited specifications to the mods. Only changed XML files are backed up. ZIP assets are not rewritten. Close the game before applying."],
+    ["Currency", "Displayed prices and manual price entry use rubles. Enable Additional Currencies only if the mod is installed; the app then writes the game's underlying currency while showing the converted ruble amount."],
+    ["Local AI", "Select an installed model from Active model. Download new models from the catalog. Ollama installation requires your consent. The catalog shows download progress, hardware recommendations and actual GPU/CPU residency."],
+  ][S.tourStep];
+  $("#tourTitle").textContent = uiText("Шаг ", "Step ") + (S.tourStep + 1) + uiText(" из ", " of ") + TOUR.length + " · " + (UI_LANG === "en" ? englishStep[0] : step.title);
+  $("#tourText").textContent = UI_LANG === "en" ? englishStep[1] : step.text;
   $("#tourDots").innerHTML = TOUR.map((_, i) => `<i class="${i === S.tourStep ? "is-on" : ""}"></i>`).join("");
-  $("#tourNext").textContent = S.tourStep === TOUR.length - 1 ? "Готово" : "Далее";
+  $("#tourNext").textContent = S.tourStep === TOUR.length - 1 ? uiText("Готово", "Done") : uiText("Далее", "Next");
 
   fitTour(el, hole, t);
   // пересчёт после того, как отыграли переход вьюхи и скролл-анимации
@@ -1521,8 +1614,11 @@ function endTour() {
   const cb = $("#tourNever");
   if (cb && cb.checked) {
     try { localStorage.setItem("fs25_tour_never", "1"); } catch (e) {}
+    call("set_config", { tour_never: true });
     toast("ok", "Понял, больше не показывать. Вернуть тур — кнопка «? Обучение».");
   } else {
+    if (S.boot.config.tour_never) call("set_config", { tour_never: false });
+    try { localStorage.removeItem("fs25_tour_never"); } catch (e) {}
     toast("info", "Обучение завершено. Открыть заново — кнопка «? Обучение».");
   }
 }
@@ -1531,6 +1627,16 @@ window.addEventListener("scroll", retourPlace, true);
 
 /* ── история обновлений ── */
 const CHANGELOG = [
+  { v: "16.0", title: "Balance & sharing", date: "2026-10-26", items: [
+    "RU / EN: переключение интерфейса, подсказок и обучения",
+    "Фильтры категорий сканирования и подгрупп зданий",
+    "Производства: циклы/ч, сырьё, выпуск, расходы, склад; точки продажи по ассортименту",
+    "Проверка баланса модов с порогами или ИИ, предупреждения без исключения из расчёта",
+    "Групповое назначение страны и веб-поиск",
+    "Экспорт/импорт цен и ТТХ без пересылки модпака",
+    "Точечная запись ZIP, восстановление после прерывания, бэкапы только изменяемых XML",
+    "Нет повторной записи неизменённых модов и настроек; счётчик байтов записи",
+  ]},
   { v: "15.5", date: "2026-10-26", title: "Таблица и шапка: порядок", items: [
     "Убраны дубли кнопок «? Обучение» и «v… история» — теперь они только в шапке",
     "Шапка таблицы и строки живут в одном скролл-контейнере: колонки не разъезжаются при горизонтальной прокрутке",

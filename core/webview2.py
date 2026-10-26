@@ -15,12 +15,15 @@ _CL64 = r"SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients"
 _RT = r"SOFTWARE\Microsoft\EdgeWebView\Runtime"
 _DL = "https://developer.microsoft.com/microsoft-edge/webview2/"
 
-TXT_TITLE = "FS25 Balancer — нужен WebView2"
+TXT_TITLE = "FS25 Balancer — WebView2"
 TXT_BODY = ("Для работы интерфейса нужен Microsoft Edge WebView2 — компонент, которым Windows "
             "отображает веб-страницы внутри программ.\n\n"
             "Он есть в современных Windows 10/11 (вместе с Edge), но на этом ПК его не нашли.\n"
             "Программа установит его тихо из репозитория Microsoft, затем запустится заново.\n\n"
-            "Установить WebView2 сейчас?")
+            "Установить WebView2 сейчас?\n\n"
+            "English: Microsoft Edge WebView2 is required to display this app's interface. "
+            "It was not found on this PC. Download and install it from Microsoft now? "
+            "The app will restart afterwards.")
 TXT_DONE = "WebView2 установлен. Программа перезапустится сама."
 TXT_FAIL = ("Не удалось установить WebView2 автоматически.\n"
             "Открой страницу официального установщика: " + _DL)
@@ -75,6 +78,9 @@ def _message(text: str, title: str, yes_no: bool = True) -> bool:
     try:
         import ctypes
         u32 = ctypes.windll.user32
+        u32.GetForegroundWindow.restype = ctypes.c_void_p
+        u32.MessageBoxW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p,
+                                    ctypes.c_wchar_p, ctypes.c_uint]
         MB_YESNO, MB_OK = 0x04, 0x00
         MB_ICONINFORMATION, MB_ICONWARNING = 0x40, 0x30
         MB_SETFOREGROUND, MB_DEFBUTTON2 = 0x10000, 0x200
@@ -84,7 +90,8 @@ def _message(text: str, title: str, yes_no: bool = True) -> bool:
             hwnd = u32.GetForegroundWindow()
         except Exception:
             hwnd = 0
-        return (u32.MessageBoxW(hwnd, text, title, flags) == 6) if yes_no else True   # 6 = IDYES
+        result = u32.MessageBoxW(hwnd, text, title, flags)
+        return result == 6 if yes_no else True
     except Exception:
         try:
             return input("Установить WebView2? [y/N] ").strip().lower() == "y"
@@ -102,11 +109,7 @@ def _winget() -> str:
 
 
 def install_silent(log=None) -> bool:
-    """WebView2 ставится официально: встроенным WinGet из репозитория Microsoft.
-
-    Вариант «скачать exe и запустить» сознательно не используем: тот же самый рантайм,
-    но из доверенного источника и без самодельного установщика в TEMP.
-    """
+    """WinGet либо официальный Microsoft bootstrapper после согласия пользователя."""
     say = log or (lambda m: None)
     import subprocess
     import webbrowser
@@ -126,6 +129,26 @@ def install_silent(log=None) -> bool:
             say("WinGet не смог установить WebView2: %s" % e)
     else:
         say("WinGet не найден — открою страницу официального установщика")
+    try:
+        import tempfile
+        import urllib.request
+        with tempfile.TemporaryDirectory(prefix="fs25-webview2-") as temporary:
+            bootstrapper = os.path.join(temporary, "MicrosoftEdgeWebview2Setup.exe")
+            say("Скачиваю официальный установщик Microsoft WebView2…")
+            request = urllib.request.Request(
+                "https://go.microsoft.com/fwlink/p/?LinkId=2124703",
+                headers={"User-Agent": "FS25Balancer/16.0"})
+            with urllib.request.urlopen(request, timeout=60) as response, open(bootstrapper, "wb") as target:
+                import shutil
+                shutil.copyfileobj(response, target, length=262144)
+            say("Устанавливаю WebView2…")
+            subprocess.run([bootstrapper, "/silent", "/install"], timeout=900,
+                           capture_output=True,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            if is_installed():
+                return True
+    except Exception as error:
+        say("Установка WebView2: %s" % error)
     _message(TXT_FAIL, TXT_TITLE, yes_no=False)
     try:
         webbrowser.open(_DL)

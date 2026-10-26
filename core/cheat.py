@@ -34,7 +34,7 @@ def threshold_verdict(item: Dict[str, Any], cfg: Any) -> Tuple[bool, str]:
     lang = getattr(cfg, "ui_lang", "ru")
     itype = str(item.get("item_type", ""))
     for attr, want, field, key in _RULES:
-        if itype != want:
+        if itype != want and not (attr == "cheat_max_capacity" and itype == "placeable"):
             continue
         limit = float(getattr(cfg, attr, 0.0) or 0.0)
         if limit <= 0:

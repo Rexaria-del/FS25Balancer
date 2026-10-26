@@ -253,6 +253,12 @@ COUNTRY_EN: Dict[str, str] = {
     "LS": "Lesotho", "SZ": "Eswatini", "MZ": "Mozambique", "MG": "Madagascar",
     "MW": "Malawi", "KM": "Comoros", "MU": "Mauritius", "SC": "Seychelles",
     "XK": "Kosovo",
+    "AG": "Antigua and Barbuda", "DM": "Dominica", "GD": "Grenada",
+    "KN": "Saint Kitts and Nevis", "LC": "Saint Lucia",
+    "VC": "Saint Vincent and the Grenadines", "GQ": "Equatorial Guinea",
+    "ST": "Sao Tome and Principe", "VA": "Vatican City",
+    "FM": "Micronesia", "KI": "Kiribati", "MH": "Marshall Islands",
+    "NR": "Nauru", "PW": "Palau", "TV": "Tuvalu",
 }
 
 

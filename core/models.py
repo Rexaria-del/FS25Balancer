@@ -63,7 +63,7 @@ class BalancerConfig:
     create_backups: bool = True
     use_local_ai: bool = True
     stop_ai_on_close: bool = True     # гасить Ollama и модели при закрытии программы
-    ai_model_name: str = "phi3"
+    ai_model_name: str = "qwen2.5:3b"
     scan_target: ScanTarget = ScanTarget.ALL
     adjust_field_prices: bool = False
     field_max_distance: float = 3.0    # км, за пределами — минимальная цена
@@ -73,6 +73,7 @@ class BalancerConfig:
     mods_dir: str = ""
     # Язык интерфейса: ru | en. Влияет на подписи категорий, стран, ТТХ и разбора цены.
     ui_lang: str = "ru"
+    tour_never: bool = False
     # Мультивыбор категорий для сканирования (заменяет одиночный scan_target).
     scan_targets: List[str] = field(default_factory=lambda: list(SCAN_CATEGORY_KEYS))
     # Детект «читерских» модов: дополнительный режим, по умолчанию выключен.

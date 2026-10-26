@@ -19,7 +19,7 @@ from typing import List, Dict, Optional, Tuple, Any
 from enum import Enum, auto
 from collections import defaultdict, OrderedDict
 
-APP_VERSION = "15.0"
+APP_VERSION = "16.0"
 APP_NAME = "FS25Balancer"
 
 # ==============================================================================
@@ -248,3 +248,8 @@ PLACEABLE_MEMORY: Dict[str, dict] = {}
 SELECTED_COUNTRIES: List[str] = []
 APP_SETTINGS: Dict[str, Any] = {}
 PRO_DATA: Dict[str, Any] = {}
+
+
+if __name__ == "__main__":
+    from app import main
+    main()
