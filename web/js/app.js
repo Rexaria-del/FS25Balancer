@@ -1642,6 +1642,9 @@ window.addEventListener("scroll", retourPlace, true);
 
 /* ── история обновлений ── */
 const CHANGELOG = [
+  { v: "16.2", title: "Smooth selection", date: "2026-10-27", items: [
+    "Панель выделения всплывает плавно, чекбоксы не перерисовывают таблицу",
+  ]},
   { v: "16.1", title: "Reliable apply & source badges", date: "2026-10-26", items: [
       "WinError 183 исправлен: legacy-бэкапы v13 мигрируют автоматически",
       "Колонка «Источник»: словари, память, ИИ или вручную — видно без тултипа",

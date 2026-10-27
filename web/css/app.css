@@ -876,8 +876,8 @@ input[type=range]:active::-webkit-slider-thumb { transform: scale(1.05); }
 .country-option { display: flex; align-items: center; gap: 8px; width: 100%; padding: 10px 12px; border: 0; border-radius: 8px; color: var(--text); background: transparent; text-align: left; cursor: pointer; font: inherit; }
 .country-option:hover { background: var(--hover); }
 .country-option input, .c-type input { accent-color: var(--indigo); cursor: pointer; }
-.selection-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 10px; border: 1px solid var(--line); border-radius: 12px; margin-bottom: 10px; background: var(--card); }
-.selection-bar[hidden] { display: none; }
+.selection-bar { position: fixed; left: 50%; bottom: 52px; z-index: 70; display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 10px 14px; border: 1px solid var(--line); border-radius: 14px; background: var(--card); box-shadow: 0 12px 32px rgba(0, 0, 0, .45); opacity: 0; transform: translate(-50%, 14px); pointer-events: none; transition: transform .18s cubic-bezier(.2, .7, .3, 1), opacity .18s ease; }
+.selection-bar.is-on { opacity: 1; transform: translate(-50%, 0); pointer-events: auto; }
 .production-line { border: 1px solid var(--line); border-radius: 12px; margin: 8px 0; padding: 12px; }
 .production-line p { font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
 #motorPop, #pricePop, #pop { max-height: calc(100vh - 24px); overflow: auto; max-width: calc(100vw - 20px); }

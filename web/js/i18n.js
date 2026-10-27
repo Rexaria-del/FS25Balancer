@@ -229,7 +229,7 @@ function applyLanguage(language) {
   translationCache.clear();
   try { localStorage.setItem("fs25_language", UI_LANG); } catch (_) {}
   document.documentElement.lang = UI_LANG;
-  document.title = "FS25 Balancer v16.1";
+  document.title = "FS25 Balancer v16.2";
   const button = document.querySelector("#languageSwitch");
   if (button) {
     button.textContent = UI_LANG === "en" ? "🌐 English / RU" : "🌐 Русский / EN";

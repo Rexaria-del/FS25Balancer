@@ -183,10 +183,18 @@ function confirmCheat(items) {
   return true;
 }
 
+function syncSelection() {
+  $$("#tbody .trow input[data-select]").forEach(input => {
+    input.checked = S.selected.has(input.dataset.select);
+  });
+  renderSelection();
+  updateStats();
+}
+
 function renderSelection() {
   const bar = $("#selectionBar");
   if (!bar) return;
-  bar.hidden = !S.selected.size;
+  bar.classList.toggle("is-on", S.selected.size > 0);
   $("#selectionCount").textContent = uiText("Выбрано: ", "Selected: ") + S.selected.size;
 }
 
@@ -259,15 +267,15 @@ document.addEventListener("DOMContentLoaded", () => {
   if (buildings) buildings.onclick = () => subgroupMenu(buildings);
 
   const bar = document.createElement("div");
-  bar.id = "selectionBar"; bar.className = "selection-bar"; bar.hidden = true;
+  bar.id = "selectionBar"; bar.className = "selection-bar";
   bar.innerHTML = `<span id="selectionCount"></span>
     <button class="mini" id="bulkCountry">${uiText("Назначить страну", "Assign country")}</button>
     <button class="mini" id="selectVisible">${uiText("Выбрать видимые", "Select visible")}</button>
     <button class="mini" id="clearSelection">${uiText("Снять выделение", "Clear selection")}</button>`;
   filters.after(bar);
   $("#bulkCountry").onclick = event => openCountry(event.currentTarget, [...S.selected]);
-  $("#selectVisible").onclick = () => { [...S.items.values()].filter(matches).forEach(item => S.selected.add(item.unique_key)); renderTable(); };
-  $("#clearSelection").onclick = () => { S.selected.clear(); renderTable(); };
+  $("#selectVisible").onclick = () => { [...S.items.values()].filter(matches).forEach(item => S.selected.add(item.unique_key)); syncSelection(); };
+  $("#clearSelection").onclick = () => { S.selected.clear(); syncSelection(); };
   let previousKey = null;
   $("#tbody").addEventListener("click", async event => {
     const row = event.target.closest(".trow");
@@ -282,7 +290,7 @@ document.addEventListener("DOMContentLoaded", () => {
           if (select.checked) S.selected.add(entry); else S.selected.delete(entry);
         });
       } else if (select.checked) S.selected.add(key); else S.selected.delete(key);
-      previousKey = key; renderTable(); return;
+      previousKey = key; syncSelection(); return;
     }
     if (event.target.closest("[data-specs]")) return openTtx(key);
     if (event.target.closest("[data-price]")) return openPrice(event.target.closest("[data-price]"), item);

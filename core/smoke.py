@@ -78,7 +78,7 @@ def run() -> None:
               check(document.querySelector('[data-subgroup="production"]'), 'Building subgroup picker');
               closeMenu();
               S.selected.add(item.unique_key); renderTable();
-              check(!document.querySelector('#selectionBar').hidden, 'Bulk selection');
+              check(document.querySelector('#selectionBar').classList.contains('is-on'), 'Bulk selection');
               applyLanguage('en');
               check(document.documentElement.lang === 'en', 'English language');
               check(document.querySelector('#btnApply').textContent.includes('Apply'), 'English Apply button');
